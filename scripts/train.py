@@ -2,6 +2,7 @@ import argparse
 import copy
 import json
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import numpy as np
 import seaborn as sns
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from datasets import Image as HFImage
 from datasets import load_dataset
@@ -21,6 +23,11 @@ from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from model_utils import apply_temperature_to_logits
+
 DEFAULT_OUTPUT_DIR = BASE_DIR / "models" / "realworld_efficientnet_b0"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DEFAULT_HF_CONFIGS = {
@@ -63,6 +70,9 @@ CHEXPERT_LABELS = [
     "Fracture",
     "Support Devices",
 ]
+
+CRITICAL_RECALL_CLASSES = {"pneumonia", "pneumothorax", "mass", "nodule"}
+SIGNIFICANT_RECALL_CLASSES = {"effusion", "cardiomegaly", "consolidation"}
 
 
 def parse_args():
@@ -116,6 +126,23 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs.")
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="AdamW learning rate.")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay.")
+    parser.add_argument(
+        "--disable-temperature-scaling",
+        action="store_true",
+        help="Skip post-training temperature scaling on the validation split.",
+    )
+    parser.add_argument(
+        "--critical-recall-target",
+        type=float,
+        default=0.72,
+        help="Minimum recall target for critical findings during threshold tuning.",
+    )
+    parser.add_argument(
+        "--significant-recall-target",
+        type=float,
+        default=0.65,
+        help="Minimum recall target for significant findings during threshold tuning.",
+    )
     parser.add_argument("--workers", type=int, default=4, help="DataLoader worker count.")
     parser.add_argument(
         "--prefetch-factor",
@@ -262,6 +289,27 @@ def detect_image_column(split, explicit_column: str | None) -> str:
 
 def normalize_label_name(name: str) -> str:
     return name.lower().replace(" ", "").replace("_", "").replace("-", "")
+
+
+def determine_threshold_policy(class_name: str, critical_recall_target: float, significant_recall_target: float) -> dict:
+    normalized_name = normalize_label_name(class_name)
+    if normalized_name in CRITICAL_RECALL_CLASSES:
+        return {
+            "tier": "critical",
+            "strategy": "recall_floor",
+            "target_recall": critical_recall_target,
+        }
+    if normalized_name in SIGNIFICANT_RECALL_CLASSES:
+        return {
+            "tier": "significant",
+            "strategy": "recall_floor",
+            "target_recall": significant_recall_target,
+        }
+    return {
+        "tier": "standard",
+        "strategy": "best_f1",
+        "target_recall": None,
+    }
 
 
 def parse_label_columns(split, explicit_columns: str | None, finding_column: str | None):
@@ -456,25 +504,109 @@ def set_backbone_trainable(model: nn.Module, trainable: bool) -> None:
         parameter.requires_grad = trainable
 
 
-def tune_thresholds(labels: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
+def fit_temperature(logits_np: np.ndarray, labels_np: np.ndarray, initial_temperature: float = 1.5, max_iter: int = 50) -> float:
+    logits = torch.tensor(logits_np, dtype=torch.float32)
+    labels = torch.tensor(labels_np, dtype=torch.float32)
+    log_temperature = nn.Parameter(torch.log(torch.tensor([initial_temperature], dtype=torch.float32)))
+    optimizer = optim.LBFGS([log_temperature], lr=0.1, max_iter=max_iter, line_search_fn="strong_wolfe")
+
+    def closure():
+        optimizer.zero_grad()
+        temperature = torch.exp(log_temperature)
+        loss = F.binary_cross_entropy_with_logits(apply_temperature_to_logits(logits, temperature), labels)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    calibrated_temperature = float(torch.exp(log_temperature).clamp(min=1e-3, max=10.0).item())
+    return calibrated_temperature
+
+
+def compute_eval_loss(logits_np: np.ndarray, labels_np: np.ndarray, pos_weight: torch.Tensor, temperature: float) -> float:
+    logits = torch.tensor(logits_np, dtype=torch.float32)
+    labels = torch.tensor(labels_np, dtype=torch.float32)
+    calibrated_logits = apply_temperature_to_logits(logits, temperature)
+    loss = F.binary_cross_entropy_with_logits(calibrated_logits, labels, pos_weight=pos_weight.detach().cpu())
+    return float(loss.item())
+
+
+def select_threshold_with_policy(
+    class_labels: np.ndarray,
+    class_probabilities: np.ndarray,
+    class_name: str,
+    critical_recall_target: float,
+    significant_recall_target: float,
+):
     candidate_thresholds = np.arange(0.1, 0.91, 0.05)
+    policy = determine_threshold_policy(class_name, critical_recall_target, significant_recall_target)
+    candidates = []
+    for threshold in candidate_thresholds:
+        predictions = (class_probabilities >= threshold).astype(int)
+        candidates.append(
+            {
+                "threshold": float(threshold),
+                "precision": float(precision_score(class_labels, predictions, zero_division=0)),
+                "recall": float(recall_score(class_labels, predictions, zero_division=0)),
+                "f1": float(f1_score(class_labels, predictions, zero_division=0)),
+            }
+        )
+
+    if policy["strategy"] == "recall_floor":
+        eligible = [candidate for candidate in candidates if candidate["recall"] >= policy["target_recall"]]
+        if eligible:
+            selected = max(eligible, key=lambda item: (item["threshold"], item["precision"], item["f1"]))
+        else:
+            selected = max(candidates, key=lambda item: (item["recall"], item["f1"], -item["threshold"]))
+    else:
+        selected = max(candidates, key=lambda item: (item["f1"], item["precision"], item["recall"], item["threshold"]))
+
+    return {
+        "class_name": class_name,
+        "tier": policy["tier"],
+        "strategy": policy["strategy"],
+        "target_recall": policy["target_recall"],
+        "selected_threshold": round(selected["threshold"], 6),
+        "selected_precision": round(selected["precision"], 6),
+        "selected_recall": round(selected["recall"], 6),
+        "selected_f1": round(selected["f1"], 6),
+    }
+
+
+def tune_thresholds(
+    labels: np.ndarray,
+    probabilities: np.ndarray,
+    class_names: list[str],
+    critical_recall_target: float,
+    significant_recall_target: float,
+):
     thresholds = []
-    for class_index in range(labels.shape[1]):
+    threshold_details = {}
+    for class_index, class_name in enumerate(class_names):
         class_labels = labels[:, class_index]
         if class_labels.max() == class_labels.min():
             thresholds.append(0.5)
+            threshold_details[class_name] = {
+                "class_name": class_name,
+                "tier": "constant",
+                "strategy": "default",
+                "target_recall": None,
+                "selected_threshold": 0.5,
+                "selected_precision": None,
+                "selected_recall": None,
+                "selected_f1": None,
+            }
             continue
 
-        best_threshold = 0.5
-        best_f1 = -1.0
-        for threshold in candidate_thresholds:
-            predictions = (probabilities[:, class_index] >= threshold).astype(int)
-            score = f1_score(class_labels, predictions, zero_division=0)
-            if score > best_f1:
-                best_f1 = score
-                best_threshold = float(threshold)
-        thresholds.append(best_threshold)
-    return np.asarray(thresholds, dtype=np.float32)
+        selected = select_threshold_with_policy(
+            class_labels,
+            probabilities[:, class_index],
+            class_name,
+            critical_recall_target=critical_recall_target,
+            significant_recall_target=significant_recall_target,
+        )
+        thresholds.append(selected["selected_threshold"])
+        threshold_details[class_name] = selected
+    return np.asarray(thresholds, dtype=np.float32), threshold_details
 
 
 def summarize_multilabel_metrics(labels: np.ndarray, probabilities: np.ndarray, thresholds: np.ndarray, class_names: list[str]):
@@ -489,10 +621,14 @@ def summarize_multilabel_metrics(labels: np.ndarray, probabilities: np.ndarray, 
 
     per_class_auc = {}
     per_class_f1 = {}
+    per_class_precision = {}
+    per_class_recall = {}
     auc_values = []
     for class_index, class_name in enumerate(class_names):
         class_labels = labels[:, class_index]
         class_predictions = predictions[:, class_index]
+        per_class_precision[class_name] = round(precision_score(class_labels, class_predictions, zero_division=0), 6)
+        per_class_recall[class_name] = round(recall_score(class_labels, class_predictions, zero_division=0), 6)
         per_class_f1[class_name] = round(f1_score(class_labels, class_predictions, zero_division=0), 6)
         if class_labels.max() == class_labels.min():
             per_class_auc[class_name] = None
@@ -510,6 +646,8 @@ def summarize_multilabel_metrics(labels: np.ndarray, probabilities: np.ndarray, 
         "macro_f1": round(float(macro_f1), 6),
         "sample_f1": round(float(sample_f1), 6),
         "macro_roc_auc": round(float(np.mean(auc_values)), 6) if auc_values else None,
+        "per_class_precision": per_class_precision,
+        "per_class_recall": per_class_recall,
         "per_class_f1": per_class_f1,
         "per_class_roc_auc": per_class_auc,
         "predictions": predictions,
@@ -550,6 +688,7 @@ def build_training_state(
     args,
     normalize_mean,
     normalize_std,
+    logit_temperature: float,
 ) -> dict:
     return {
         "epoch": epoch,
@@ -564,22 +703,20 @@ def build_training_state(
         "image_size": args.image_size,
         "normalize_mean": normalize_mean,
         "normalize_std": normalize_std,
+        "logit_temperature": logit_temperature,
         "args": vars(args),
     }
 
 
-def evaluate(
+def collect_outputs(
     model: nn.Module,
     loader: DataLoader,
-    criterion: nn.Module,
-    thresholds: np.ndarray | None,
-    class_names: list[str],
     log_every: int = 0,
     split_name: str = "eval",
 ):
     model.eval()
-    total_loss = 0.0
     all_labels = []
+    all_logits = []
     all_probabilities = []
     start_time = time.perf_counter()
 
@@ -589,11 +726,10 @@ def evaluate(
             images = images.to(DEVICE, non_blocking=True)
             labels = labels.to(DEVICE, non_blocking=True)
             logits = model(images)
-            loss = criterion(logits, labels)
             probabilities = torch.sigmoid(logits)
 
-            total_loss += loss.item() * images.size(0)
             all_labels.append(labels.cpu().numpy())
+            all_logits.append(logits.cpu().numpy())
             all_probabilities.append(probabilities.cpu().numpy())
             if log_every and (step == 1 or step % log_every == 0 or step == len(loader)):
                 elapsed = time.perf_counter() - start_time
@@ -602,17 +738,48 @@ def evaluate(
                 print(
                     f"[{split_name}] step {step}/{len(loader)} | "
                     f"samples={samples_done}/{len(loader.dataset)} | "
-                    f"loss={loss.item():.4f} | {rate:.1f} samples/s"
+                    f"{rate:.1f} samples/s"
                 )
 
-    labels_np = np.concatenate(all_labels, axis=0)
-    probabilities_np = np.concatenate(all_probabilities, axis=0)
-    threshold_values = tune_thresholds(labels_np, probabilities_np) if thresholds is None else thresholds
-    metric_bundle = summarize_multilabel_metrics(labels_np, probabilities_np, threshold_values, class_names)
-    metric_bundle["loss"] = round(float(total_loss / max(len(loader.dataset), 1)), 6)
+    return {
+        "labels_np": np.concatenate(all_labels, axis=0),
+        "logits_np": np.concatenate(all_logits, axis=0),
+        "probabilities_np": np.concatenate(all_probabilities, axis=0),
+    }
+
+
+def evaluate_predictions(
+    labels_np: np.ndarray,
+    logits_np: np.ndarray,
+    class_names: list[str],
+    pos_weight: torch.Tensor,
+    critical_recall_target: float,
+    significant_recall_target: float,
+    thresholds: np.ndarray | None = None,
+    logit_temperature: float = 1.0,
+):
+    calibrated_probabilities = torch.sigmoid(
+        apply_temperature_to_logits(torch.tensor(logits_np, dtype=torch.float32), logit_temperature)
+    ).numpy()
+    if thresholds is None:
+        threshold_values, threshold_details = tune_thresholds(
+            labels_np,
+            calibrated_probabilities,
+            class_names=class_names,
+            critical_recall_target=critical_recall_target,
+            significant_recall_target=significant_recall_target,
+        )
+    else:
+        threshold_values = thresholds
+        threshold_details = {}
+
+    metric_bundle = summarize_multilabel_metrics(labels_np, calibrated_probabilities, threshold_values, class_names)
+    metric_bundle["loss"] = round(compute_eval_loss(logits_np, labels_np, pos_weight, logit_temperature), 6)
     metric_bundle["thresholds"] = threshold_values.tolist()
+    metric_bundle["threshold_details"] = threshold_details
     metric_bundle["labels"] = labels_np.tolist()
-    metric_bundle["probabilities"] = probabilities_np.tolist()
+    metric_bundle["probabilities"] = calibrated_probabilities.tolist()
+    metric_bundle["logit_temperature"] = round(float(logit_temperature), 6)
     return metric_bundle
 
 
@@ -793,6 +960,7 @@ def train():
     best_state = None
     start_epoch = 0
     last_checkpoint_path = output_dir / "realworld_efficientnet_b0_last.pth"
+    current_temperature = 1.0
 
     if args.resume_from is not None:
         print(f"Resuming training from {args.resume_from}")
@@ -806,6 +974,7 @@ def train():
         best_val_f1 = float(resume_state.get("best_val_f1", -1.0))
         best_state = resume_state.get("best_state")
         history = resume_state.get("history", [])
+        current_temperature = float(resume_state.get("logit_temperature", 1.0))
         print(f"Resume state loaded at epoch {start_epoch} with best_val_micro_f1={best_val_f1:.4f}")
 
     torch.save(
@@ -822,6 +991,7 @@ def train():
             args=args,
             normalize_mean=normalize_mean,
             normalize_std=normalize_std,
+            logit_temperature=current_temperature,
         ),
         last_checkpoint_path,
     )
@@ -833,6 +1003,7 @@ def train():
     print(f"Class count: {len(class_names)}")
     print(f"Classes: {class_names}")
     print(f"Train/Val/Test sizes: {len(train_dataset)} / {len(val_dataset)} / {len(test_dataset)}")
+    print(f"Temperature scaling enabled: {not args.disable_temperature_scaling}")
     print(
         f"DataLoader config: batch_size={args.batch_size}, workers={args.workers}, "
         f"prefetch_factor={args.prefetch_factor if args.workers > 0 else 'n/a'}, "
@@ -884,14 +1055,26 @@ def train():
             train_metrics = summarize_multilabel_metrics(train_labels_np, train_probabilities_np, train_thresholds, class_names)
             train_loss = running_loss / max(len(train_loader.dataset), 1)
 
-            val_metrics = evaluate(
+            val_outputs = collect_outputs(
                 model,
                 val_loader,
-                criterion,
-                thresholds=None,
-                class_names=class_names,
                 log_every=args.log_every,
                 split_name="val",
+            )
+            val_temperature = (
+                fit_temperature(val_outputs["logits_np"], val_outputs["labels_np"])
+                if not args.disable_temperature_scaling
+                else 1.0
+            )
+            val_metrics = evaluate_predictions(
+                val_outputs["labels_np"],
+                val_outputs["logits_np"],
+                class_names=class_names,
+                pos_weight=pos_weight,
+                critical_recall_target=args.critical_recall_target,
+                significant_recall_target=args.significant_recall_target,
+                thresholds=None,
+                logit_temperature=val_temperature,
             )
             epoch_record = {
                 "epoch": epoch + 1,
@@ -904,6 +1087,7 @@ def train():
                 "val_micro_f1": val_metrics["micro_f1"],
                 "val_macro_f1": val_metrics["macro_f1"],
                 "val_macro_roc_auc": val_metrics["macro_roc_auc"],
+                "val_logit_temperature": val_metrics["logit_temperature"],
             }
             history.append(epoch_record)
 
@@ -911,19 +1095,22 @@ def train():
                 f"Epoch {epoch + 1}/{args.epochs} | "
                 f"train_loss={train_loss:.4f} | train_micro_f1={train_metrics['micro_f1']:.4f} | "
                 f"val_loss={val_metrics['loss']:.4f} | val_micro_f1={val_metrics['micro_f1']:.4f} | "
-                f"val_macro_auc={val_metrics['macro_roc_auc']}"
+                f"val_macro_auc={val_metrics['macro_roc_auc']} | temp={val_metrics['logit_temperature']:.3f}"
             )
 
             if val_metrics["micro_f1"] > best_val_f1:
                 best_val_f1 = float(val_metrics["micro_f1"])
+                current_temperature = float(val_metrics["logit_temperature"])
                 best_state = {
                     "model_state_dict": copy.deepcopy(model.state_dict()),
                     "architecture": "efficientnet_b0",
                     "class_names": class_names,
                     "thresholds": val_metrics["thresholds"],
+                    "threshold_details": val_metrics["threshold_details"],
                     "image_size": args.image_size,
                     "normalize_mean": normalize_mean,
                     "normalize_std": normalize_std,
+                    "logit_temperature": current_temperature,
                     "multi_label": True,
                     "label_spec": label_spec,
                 }
@@ -943,6 +1130,7 @@ def train():
                     args=args,
                     normalize_mean=normalize_mean,
                     normalize_std=normalize_std,
+                    logit_temperature=current_temperature,
                 ),
                 last_checkpoint_path,
             )
@@ -961,6 +1149,7 @@ def train():
                 args=args,
                 normalize_mean=normalize_mean,
                 normalize_std=normalize_std,
+                logit_temperature=current_temperature,
             ),
             last_checkpoint_path,
         )
@@ -974,14 +1163,21 @@ def train():
     torch.save(best_state, checkpoint_path)
     model.load_state_dict(best_state["model_state_dict"])
 
-    test_metrics = evaluate(
+    test_outputs = collect_outputs(
         model,
         test_loader,
-        criterion,
-        thresholds=np.asarray(best_state["thresholds"], dtype=np.float32),
-        class_names=class_names,
         log_every=args.log_every,
         split_name="test",
+    )
+    test_metrics = evaluate_predictions(
+        test_outputs["labels_np"],
+        test_outputs["logits_np"],
+        class_names=class_names,
+        pos_weight=pos_weight,
+        critical_recall_target=args.critical_recall_target,
+        significant_recall_target=args.significant_recall_target,
+        thresholds=np.asarray(best_state["thresholds"], dtype=np.float32),
+        logit_temperature=float(best_state.get("logit_temperature", 1.0)),
     )
 
     baseline_stats = compute_baseline_stats(
@@ -1003,6 +1199,7 @@ def train():
         "multi_label": True,
         "class_names": class_names,
         "best_val_micro_f1": round(best_val_f1, 6),
+        "logit_temperature": round(float(best_state.get("logit_temperature", 1.0)), 6),
         "test_loss": test_metrics["loss"],
         "test_micro_precision": test_metrics["micro_precision"],
         "test_micro_recall": test_metrics["micro_recall"],
@@ -1012,14 +1209,19 @@ def train():
         "test_macro_f1": test_metrics["macro_f1"],
         "test_sample_f1": test_metrics["sample_f1"],
         "test_macro_roc_auc": test_metrics["macro_roc_auc"],
+        "per_class_precision": test_metrics["per_class_precision"],
+        "per_class_recall": test_metrics["per_class_recall"],
         "per_class_f1": test_metrics["per_class_f1"],
         "per_class_roc_auc": test_metrics["per_class_roc_auc"],
         "thresholds": best_state["thresholds"],
+        "threshold_details": best_state.get("threshold_details", {}),
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "freeze_backbone_epochs": args.freeze_backbone_epochs,
+        "critical_recall_target": args.critical_recall_target,
+        "significant_recall_target": args.significant_recall_target,
         "image_size": args.image_size,
         "device": str(DEVICE),
     }

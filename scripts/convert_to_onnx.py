@@ -1,6 +1,7 @@
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import onnx
@@ -11,6 +12,11 @@ from torchvision.models import efficientnet_b0, mobilenet_v3_small
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from model_utils import CalibratedModel
+
 LEGACY_MODEL_DIR = BASE_DIR / "models"
 REALWORLD_MODEL_DIR = BASE_DIR / "models" / "realworld_efficientnet_b0"
 
@@ -139,8 +145,9 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     state_dict, metadata = load_checkpoint(checkpoint_path)
-    model = build_model(metadata)
-    model.load_state_dict(state_dict)
+    base_model = build_model(metadata)
+    base_model.load_state_dict(state_dict)
+    model = CalibratedModel(base_model, float(metadata.get("logit_temperature", 1.0)))
     model.eval()
 
     artifact_prefix = args.artifact_prefix or checkpoint_path.stem
@@ -161,6 +168,7 @@ def main():
         "architecture": metadata.get("architecture", "mobilenet_v3_small"),
         "class_names": metadata.get("class_names", ["Normal", "Pneumonia"]),
         "multi_label": bool(metadata.get("multi_label", False)),
+        "logit_temperature": float(metadata.get("logit_temperature", 1.0)),
         "image_size": image_size,
         "base_onnx": base_path.name,
         "optimized_onnx": optimized_path.name,

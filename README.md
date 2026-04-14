@@ -60,7 +60,7 @@ Use Python `3.10` to `3.13` locally. `onnxruntime` does not currently support Py
 - Person 1: training, metrics, plots, ONNX export, benchmark evidence
 - Person 2: app integration, A/B routing, Docker, GitHub Actions, Hugging Face deployment, demo screenshots
 
-Detailed runbooks are in [docs/TRAINING_AND_HANDOFF.md](/home/prakhar/Downloads/ml_dl_ops_pro/pneumo_ops/docs/TRAINING_AND_HANDOFF.md:1), [docs/DEPLOYMENT.md](/home/prakhar/Downloads/ml_dl_ops_pro/pneumo_ops/docs/DEPLOYMENT.md:1), and [docs/REALWORLD_UPGRADE.md](/home/prakhar/Downloads/ml_dl_ops_pro/pneumo_ops/docs/REALWORLD_UPGRADE.md:1).
+Detailed runbooks are in [docs/REALWORLD_DEPLOYMENT_RUNBOOK.md](/home/b23bb1032/pneumo_ops/docs/REALWORLD_DEPLOYMENT_RUNBOOK.md:1), [docs/REALWORLD_MODEL_REVIEW.md](/home/b23bb1032/pneumo_ops/docs/REALWORLD_MODEL_REVIEW.md:1), [docs/DEPLOYMENT.md](/home/b23bb1032/pneumo_ops/docs/DEPLOYMENT.md:1), [docs/TRAINING_AND_HANDOFF.md](/home/b23bb1032/pneumo_ops/docs/TRAINING_AND_HANDOFF.md:1), and [docs/REALWORLD_UPGRADE.md](/home/b23bb1032/pneumo_ops/docs/REALWORLD_UPGRADE.md:1).
 
 ## Files you should mention in the viva/demo
 
@@ -85,12 +85,35 @@ That gives you a fair A/B test focused on inference optimization rather than arc
 
 ## Real-world extension
 
-The main submission remains the lightweight prototype. For a more realistic training path, the repo now also includes:
+The repo now also includes a real-world training path built around:
 
 - `scripts/train.py` for Hugging Face or ImageFolder-based real-world chest X-ray training with `EfficientNet-B0`
 - multi-label threshold tuning and richer metrics for datasets such as `alkzar90/NIH-Chest-X-ray-dataset` or `danjacobellis/chexpert`
 - backend support for weighted A/B routing, Prometheus `/metrics`, structured logging, KS-test drift checks, and ONNX fallback
 
+### Real-world model trained status
+
+The real-world model can be trained with:
+
+`uv run scripts/train.py --dataset-source hf --hf-dataset alkzar90/NIH-Chest-X-ray-dataset --output-dir models/realworld_efficientnet_b0`
+
+This training path writes artifacts under `models/realworld_efficientnet_b0/`, including:
+
+- `realworld_efficientnet_b0.pth`
+- `training_metrics.json`
+- `training_history.json`
+- `baseline_stats.json`
+- plots under `models/realworld_efficientnet_b0/plots/`
+
+If training is interrupted, resume from:
+
+`uv run scripts/train.py --resume-from models/realworld_efficientnet_b0/realworld_efficientnet_b0_last.pth`
+
+For the full next-stage workflow after training, see:
+
+- [docs/REALWORLD_MODEL_REVIEW.md](/home/b23bb1032/pneumo_ops/docs/REALWORLD_MODEL_REVIEW.md:1)
+- [docs/REALWORLD_DEPLOYMENT_RUNBOOK.md](/home/b23bb1032/pneumo_ops/docs/REALWORLD_DEPLOYMENT_RUNBOOK.md:1)
+
 Recommended example:
 
-`python scripts/train.py --dataset-source hf --hf-dataset alkzar90/NIH-Chest-X-ray-dataset --output-dir models/realworld_efficientnet_b0`
+`uv run scripts/train.py --dataset-source hf --hf-dataset alkzar90/NIH-Chest-X-ray-dataset --output-dir models/realworld_efficientnet_b0`

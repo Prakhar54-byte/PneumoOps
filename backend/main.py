@@ -25,6 +25,7 @@ from torchvision import transforms
 from torchvision.models import efficientnet_b0, mobilenet_v3_small
 
 from frontend.app import build_demo
+from model_utils import CalibratedModel
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -132,6 +133,7 @@ def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
             "normalize_mean": [0.485, 0.456, 0.406],
             "normalize_std": [0.229, 0.224, 0.225],
             "thresholds": [0.5, 0.5],
+            "logit_temperature": 1.0,
             "multi_label": False,
         }
 
@@ -145,6 +147,7 @@ def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
             "normalize_mean": payload.get("normalize_mean", [0.485, 0.456, 0.406]),
             "normalize_std": payload.get("normalize_std", [0.229, 0.224, 0.225]),
             "thresholds": payload.get("thresholds", [0.5] * len(payload.get("class_names", ["No Finding"]))),
+            "logit_temperature": float(payload.get("logit_temperature", 1.0)),
             "multi_label": bool(payload.get("multi_label", True)),
         }
 
@@ -156,6 +159,7 @@ def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
         "normalize_mean": [0.485, 0.456, 0.406],
         "normalize_std": [0.229, 0.224, 0.225],
         "thresholds": [0.5, 0.5],
+        "logit_temperature": 1.0,
         "multi_label": False,
     }
 
@@ -165,6 +169,7 @@ CLASS_NAMES = MODEL_METADATA["class_names"]
 MULTI_LABEL = bool(MODEL_METADATA["multi_label"])
 IMAGE_SIZE = int(MODEL_METADATA["image_size"])
 THRESHOLDS = np.asarray(MODEL_METADATA["thresholds"], dtype=np.float32)
+LOGIT_TEMPERATURE = float(MODEL_METADATA.get("logit_temperature", 1.0))
 
 TRANSFORM = transforms.Compose(
     [
@@ -203,13 +208,14 @@ def build_model() -> torch.nn.Module | None:
     architecture = MODEL_METADATA["architecture"]
     num_outputs = len(CLASS_NAMES)
     if architecture == "efficientnet_b0":
-        model = efficientnet_b0(weights=None)
-        model.classifier[1] = torch.nn.Linear(model.classifier[1].in_features, num_outputs)
+        base_model = efficientnet_b0(weights=None)
+        base_model.classifier[1] = torch.nn.Linear(base_model.classifier[1].in_features, num_outputs)
     else:
-        model = mobilenet_v3_small(weights=None)
-        model.classifier[3] = torch.nn.Linear(model.classifier[3].in_features, num_outputs)
+        base_model = mobilenet_v3_small(weights=None)
+        base_model.classifier[3] = torch.nn.Linear(base_model.classifier[3].in_features, num_outputs)
 
-    model.load_state_dict(MODEL_METADATA["state_dict"])
+    base_model.load_state_dict(MODEL_METADATA["state_dict"])
+    model = CalibratedModel(base_model, LOGIT_TEMPERATURE)
     model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
     model.eval()
     return model
@@ -455,6 +461,7 @@ def health():
         "class_count": len(CLASS_NAMES),
         "class_names": CLASS_NAMES,
         "multi_label": MULTI_LABEL,
+        "logit_temperature": LOGIT_TEMPERATURE,
         "training_metrics": load_json(RUNTIME_PATHS["training_metrics"]),
         "onnx_export_report": load_json(RUNTIME_PATHS["onnx_export_report"]),
         "recent_requests": list(REQUEST_LOG_HISTORY),

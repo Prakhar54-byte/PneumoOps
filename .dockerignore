@@ -1,0 +1,42 @@
+# Git metadata
+.git/
+.gitignore
+
+# Local environments and caches
+.codex
+.venv/
+venv/
+env/
+.codex/
+.cache/
+.huggingface-spaces/
+data/hf_cache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Local docs and screenshots not needed in the image build context
+Screenshot_*.png
+
+# Development-only files
+docker-compose.yml
+
+# Large generated artifacts that should not bloat the Docker build context
+data/*.npz
+models/realworld_densenet121/
+models/realworld_efficientnet_b0/
+models/plots/
+models/*.csv
+
+# Keep core project files available
+!backend/
+!frontend/
+!scripts/
+!models/
+!data/
+!docs/
+!README.md
+!requirements.txt
+!Dockerfile
+!.python-version
+!.github/

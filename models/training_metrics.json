@@ -1,0 +1,26 @@
+{
+  "best_val_f1": 0.984772,
+  "test_loss": 0.254304,
+  "test_accuracy": 0.902244,
+  "test_precision": 0.931759,
+  "test_recall": 0.910256,
+  "test_f1": 0.920882,
+  "test_roc_auc": 0.960706,
+  "test_specificity": 0.888889,
+  "test_sensitivity": 0.910256,
+  "confusion_matrix": [
+    [
+      208,
+      26
+    ],
+    [
+      35,
+      355
+    ]
+  ],
+  "epochs": 8,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "device": "cuda"
+}

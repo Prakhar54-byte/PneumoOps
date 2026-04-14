@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+  pneumoops:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./models:/app/models
+    environment:
+      - PYTHONPATH=/app
+      - PORT=7860

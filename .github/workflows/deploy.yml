@@ -1,0 +1,120 @@
+name: CI and Hugging Face Deploy
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate Python modules
+        run: |
+          python -m py_compile scripts/train.py scripts/convert_to_onnx.py backend/main.py frontend/app.py scripts/smoke_test_app.py
+
+      - name: Import smoke check
+        run: |
+          python - <<'PY'
+          import fastapi, gradio, torch, onnxruntime, datasets, prometheus_client, scipy
+          from backend.main import app
+          print("Imports OK")
+          print(app.title)
+          PY
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deploy dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Sync Space and model artifacts to Hugging Face Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
+          HF_MODEL_REPO: ${{ secrets.HF_MODEL_REPO }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import HfApi
+
+          token = os.environ["HF_TOKEN"]
+          api = HfApi(token=token)
+          space_repo = os.environ["HF_SPACE_REPO"]
+          model_repo = os.environ.get("HF_MODEL_REPO")
+          revision_tag = f"build-{os.environ['GITHUB_SHA'][:7]}"
+
+          api.create_repo(repo_id=space_repo, repo_type="space", exist_ok=True, space_sdk="docker")
+          api.upload_folder(
+              repo_id=space_repo,
+              repo_type="space",
+              folder_path=".",
+              commit_message=f"Deploy Space {revision_tag}",
+              ignore_patterns=[
+                  ".git/*",
+                  "__pycache__/*",
+                  "*.pyc",
+                  ".venv/*",
+                  "venv/*",
+              ],
+          )
+          try:
+              api.create_tag(
+                  repo_id=space_repo,
+                  repo_type="space",
+                  tag=revision_tag,
+                  tag_message="Automated Space deployment tag",
+              )
+          except Exception:
+              pass
+
+          if model_repo:
+              api.create_repo(repo_id=model_repo, repo_type="model", exist_ok=True)
+              candidate_dirs = [
+                  Path("models/realworld_efficientnet_b0"),
+                  Path("models"),
+              ]
+              for folder in candidate_dirs:
+                  if folder.exists():
+                      api.upload_folder(
+                          repo_id=model_repo,
+                          repo_type="model",
+                          folder_path=str(folder),
+                          path_in_repo=folder.name,
+                          commit_message=f"Upload model artifacts {revision_tag}",
+                      )
+              try:
+                  api.create_tag(
+                      repo_id=model_repo,
+                      repo_type="model",
+                      tag=revision_tag,
+                      tag_message="Automated model artifact tag",
+                  )
+              except Exception:
+                  pass
+          PY

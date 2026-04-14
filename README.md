@@ -15,6 +15,7 @@ PneumoOps is a continuous MLOps mini-project for chest X-ray classification buil
 - latency tracking and simulated data drift monitoring
 - Gradio frontend mounted into the same Dockerized app
 - GitHub Actions sync to a Hugging Face Docker Space
+- optional real-world upgrade path using Hugging Face chest X-ray datasets and EfficientNet-B0
 
 ## Current measured results
 
@@ -59,11 +60,12 @@ Use Python `3.10` to `3.13` locally. `onnxruntime` does not currently support Py
 - Person 1: training, metrics, plots, ONNX export, benchmark evidence
 - Person 2: app integration, A/B routing, Docker, GitHub Actions, Hugging Face deployment, demo screenshots
 
-Detailed runbooks are in [docs/TRAINING_AND_HANDOFF.md](/home/prakhar/Downloads/ml_dl_ops_pro/pneumo_ops/docs/TRAINING_AND_HANDOFF.md:1) and [docs/DEPLOYMENT.md](/home/prakhar/Downloads/ml_dl_ops_pro/pneumo_ops/docs/DEPLOYMENT.md:1).
+Detailed runbooks are in [docs/TRAINING_AND_HANDOFF.md](/home/prakhar/Downloads/ml_dl_ops_pro/pneumo_ops/docs/TRAINING_AND_HANDOFF.md:1), [docs/DEPLOYMENT.md](/home/prakhar/Downloads/ml_dl_ops_pro/pneumo_ops/docs/DEPLOYMENT.md:1), and [docs/REALWORLD_UPGRADE.md](/home/prakhar/Downloads/ml_dl_ops_pro/pneumo_ops/docs/REALWORLD_UPGRADE.md:1).
 
 ## Files you should mention in the viva/demo
 
 - `scripts/train_model.py`: training plus baseline drift statistics generation
+- `scripts/train_realworld_model.py`: advanced DenseNet121 trainer for larger hospital-style datasets
 - `scripts/convert_to_onnx.py`: ONNX export plus optimized fallback handling
 - `scripts/benchmark_models.py`: PyTorch vs ONNX latency comparison
 - `scripts/smoke_test_app.py`: local API/interface validation
@@ -80,3 +82,15 @@ Train one model once, export it into two serving formats, and compare them in pr
 - Model B: optimized ONNX Runtime model
 
 That gives you a fair A/B test focused on inference optimization rather than architecture differences.
+
+## Real-world extension
+
+The main submission remains the lightweight prototype. For a more realistic training path, the repo now also includes:
+
+- `scripts/train.py` for Hugging Face or ImageFolder-based real-world chest X-ray training with `EfficientNet-B0`
+- multi-label threshold tuning and richer metrics for datasets such as `alkzar90/NIH-Chest-X-ray-dataset` or `danjacobellis/chexpert`
+- backend support for weighted A/B routing, Prometheus `/metrics`, structured logging, KS-test drift checks, and ONNX fallback
+
+Recommended example:
+
+`python scripts/train.py --dataset-source hf --hf-dataset alkzar90/NIH-Chest-X-ray-dataset --output-dir models/realworld_efficientnet_b0`

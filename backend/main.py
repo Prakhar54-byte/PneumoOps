@@ -1,0 +1,560 @@
+import asyncio
+import io
+import json
+import logging
+import os
+import random
+import time
+from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import gradio as gr
+import numpy as np
+import onnxruntime as ort
+import torch
+import uvicorn
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
+from PIL import Image
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from scipy.stats import ks_2samp
+from torchvision import transforms
+from torchvision.models import efficientnet_b0, mobilenet_v3_small
+
+from frontend.app import build_demo
+
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+LEGACY_MODEL_DIR = BASE_DIR / "models"
+REALWORLD_MODEL_DIR = BASE_DIR / "models" / "realworld_efficientnet_b0"
+
+PROFILE = os.getenv("PNEUMOOPS_PROFILE", "prototype").lower()
+MODEL_DIR = Path(os.getenv("PNEUMOOPS_MODEL_DIR", REALWORLD_MODEL_DIR if PROFILE == "realworld" else LEGACY_MODEL_DIR))
+REQUEST_LOG_HISTORY = deque(maxlen=20)
+
+API_KEY = os.getenv("PNEUMOOPS_API_KEY")
+ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("PNEUMOOPS_ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
+TRAFFIC_WEIGHTS = {"pytorch": 60, "onnx": 40}
+LOW_CONFIDENCE_THRESHOLD = float(os.getenv("PNEUMOOPS_LOW_CONFIDENCE_THRESHOLD", "0.60"))
+MIN_UPLOAD_EDGE = int(os.getenv("PNEUMOOPS_MIN_UPLOAD_EDGE", "96"))
+MAX_CHANNEL_DELTA = float(os.getenv("PNEUMOOPS_MAX_CHANNEL_DELTA", "0.08"))
+MIN_ASPECT_RATIO = float(os.getenv("PNEUMOOPS_MIN_ASPECT_RATIO", "0.6"))
+MAX_ASPECT_RATIO = float(os.getenv("PNEUMOOPS_MAX_ASPECT_RATIO", "1.6"))
+
+REQUEST_COUNTER = Counter(
+    "pneumoops_requests_total",
+    "Total inference requests served by PneumoOps.",
+    ["model", "status"],
+)
+LATENCY_HISTOGRAM = Histogram(
+    "pneumoops_inference_latency_ms",
+    "Inference latency per model in milliseconds.",
+    ["model"],
+    buckets=(5, 10, 25, 50, 100, 250, 500, 1000),
+)
+DRIFT_COUNTER = Counter(
+    "pneumoops_drift_alerts_total",
+    "Number of drift alerts emitted by PneumoOps.",
+    ["status"],
+)
+
+logger = logging.getLogger("pneumoops")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+def resolve_path(candidates: list[Path]) -> Path | None:
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def load_json(path: Path | None, fallback: dict | None = None) -> dict:
+    if path and path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {} if fallback is None else fallback
+
+
+def resolve_runtime_paths(model_dir: Path) -> dict[str, Path | None]:
+    checkpoint_path = resolve_path(
+        [
+            model_dir / "realworld_efficientnet_b0.pth",
+            model_dir / "pneumo_model.pth",
+        ]
+    )
+    onnx_report_path = resolve_path([model_dir / "onnx_export_report.json", LEGACY_MODEL_DIR / "onnx_export_report.json"])
+    onnx_report = load_json(onnx_report_path)
+
+    base_onnx = onnx_report.get("base_onnx")
+    optimized_onnx = onnx_report.get("optimized_onnx")
+    serving_onnx = onnx_report.get("serving_onnx")
+
+    onnx_candidates = []
+    if serving_onnx:
+        onnx_candidates.append(model_dir / serving_onnx)
+    if optimized_onnx:
+        onnx_candidates.append(model_dir / optimized_onnx)
+    if base_onnx:
+        onnx_candidates.append(model_dir / base_onnx)
+    onnx_candidates.extend(
+        [
+            model_dir / "realworld_efficientnet_b0_quantized.onnx",
+            model_dir / "realworld_efficientnet_b0_optimized.onnx",
+            model_dir / "realworld_efficientnet_b0.onnx",
+            model_dir / "pneumo_model_quantized.onnx",
+            model_dir / "pneumo_model_optimized.onnx",
+            model_dir / "pneumo_model.onnx",
+        ]
+    )
+
+    return {
+        "checkpoint": checkpoint_path,
+        "onnx": resolve_path(onnx_candidates),
+        "training_metrics": resolve_path([model_dir / "training_metrics.json", LEGACY_MODEL_DIR / "training_metrics.json"]),
+        "baseline_stats": resolve_path([model_dir / "baseline_stats.json", LEGACY_MODEL_DIR / "baseline_stats.json"]),
+        "onnx_export_report": onnx_report_path,
+    }
+
+
+RUNTIME_PATHS = resolve_runtime_paths(MODEL_DIR)
+
+
+def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
+    if checkpoint_path is None or not checkpoint_path.exists():
+        return {
+            "architecture": "mobilenet_v3_small",
+            "class_names": ["Normal", "Pneumonia"],
+            "image_size": 224,
+            "normalize_mean": [0.485, 0.456, 0.406],
+            "normalize_std": [0.229, 0.224, 0.225],
+            "thresholds": [0.5, 0.5],
+            "multi_label": False,
+        }
+
+    payload = torch.load(checkpoint_path, map_location="cpu")
+    if isinstance(payload, dict) and "model_state_dict" in payload:
+        return {
+            "state_dict": payload["model_state_dict"],
+            "architecture": payload.get("architecture", "efficientnet_b0"),
+            "class_names": payload.get("class_names", ["No Finding"]),
+            "image_size": int(payload.get("image_size", 320)),
+            "normalize_mean": payload.get("normalize_mean", [0.485, 0.456, 0.406]),
+            "normalize_std": payload.get("normalize_std", [0.229, 0.224, 0.225]),
+            "thresholds": payload.get("thresholds", [0.5] * len(payload.get("class_names", ["No Finding"]))),
+            "multi_label": bool(payload.get("multi_label", True)),
+        }
+
+    return {
+        "state_dict": payload,
+        "architecture": "mobilenet_v3_small",
+        "class_names": ["Normal", "Pneumonia"],
+        "image_size": 224,
+        "normalize_mean": [0.485, 0.456, 0.406],
+        "normalize_std": [0.229, 0.224, 0.225],
+        "thresholds": [0.5, 0.5],
+        "multi_label": False,
+    }
+
+
+MODEL_METADATA = load_checkpoint_metadata(RUNTIME_PATHS["checkpoint"])
+CLASS_NAMES = MODEL_METADATA["class_names"]
+MULTI_LABEL = bool(MODEL_METADATA["multi_label"])
+IMAGE_SIZE = int(MODEL_METADATA["image_size"])
+THRESHOLDS = np.asarray(MODEL_METADATA["thresholds"], dtype=np.float32)
+
+TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.Grayscale(num_output_channels=3),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=MODEL_METADATA["normalize_mean"],
+            std=MODEL_METADATA["normalize_std"],
+        ),
+    ]
+)
+
+BASELINE_STATS = load_json(
+    RUNTIME_PATHS["baseline_stats"],
+    fallback={
+        "pixel_mean_mean": 0.5,
+        "pixel_mean_std": 0.1,
+        "pixel_std_mean": 0.2,
+        "pixel_std_std": 0.05,
+        "histogram_bins": 32,
+        "histogram_mean": [1.0 / 32.0] * 32,
+        "pixel_reference_sample": [],
+        "drift_threshold": 1.2,
+        "drift_ks_pvalue_threshold": 0.05,
+        "class_names": CLASS_NAMES,
+    },
+)
+
+
+def build_model() -> torch.nn.Module | None:
+    checkpoint_path = RUNTIME_PATHS["checkpoint"]
+    if checkpoint_path is None or not checkpoint_path.exists():
+        return None
+
+    architecture = MODEL_METADATA["architecture"]
+    num_outputs = len(CLASS_NAMES)
+    if architecture == "efficientnet_b0":
+        model = efficientnet_b0(weights=None)
+        model.classifier[1] = torch.nn.Linear(model.classifier[1].in_features, num_outputs)
+    else:
+        model = mobilenet_v3_small(weights=None)
+        model.classifier[3] = torch.nn.Linear(model.classifier[3].in_features, num_outputs)
+
+    model.load_state_dict(MODEL_METADATA["state_dict"])
+    model.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+    model.eval()
+    return model
+
+
+def build_onnx_session():
+    onnx_path = RUNTIME_PATHS["onnx"]
+    if onnx_path is None or not onnx_path.exists():
+        return None, None
+    session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    return session, onnx_path.name
+
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+PYTORCH_MODEL = build_model()
+ONNX_SESSION, ACTIVE_ONNX_MODEL_NAME = build_onnx_session()
+
+app = FastAPI(
+    title="PneumoOps API",
+    description="Production-style MLOps pipeline for medical image classification with A/B routing and drift monitoring.",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    if API_KEY and request.url.path not in {"/health", "/metrics", "/"}:
+        provided = request.headers.get("x-api-key")
+        if provided != API_KEY:
+            return Response(content="Unauthorized", status_code=401)
+    return await call_next(request)
+
+
+def load_image_from_upload(upload: UploadFile) -> Image.Image:
+    try:
+        content = upload.file.read()
+        return Image.open(io.BytesIO(content)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Uploaded file is not a valid image.") from exc
+
+
+def summarize_image(image: Image.Image) -> dict[str, Any]:
+    gray = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
+    width, height = image.size
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    channel_delta = float(
+        np.mean(np.abs(rgb[:, :, 0] - rgb[:, :, 1]))
+        + np.mean(np.abs(rgb[:, :, 1] - rgb[:, :, 2]))
+        + np.mean(np.abs(rgb[:, :, 0] - rgb[:, :, 2]))
+    ) / 3.0
+    return {
+        "width": width,
+        "height": height,
+        "aspect_ratio": round(width / max(height, 1), 4),
+        "pixel_mean": round(float(np.mean(gray)), 6),
+        "pixel_std": round(float(np.std(gray)), 6),
+        "pixel_min": round(float(np.min(gray)), 6),
+        "pixel_max": round(float(np.max(gray)), 6),
+        "channel_delta": round(channel_delta, 6),
+    }
+
+
+def validate_image(image: Image.Image, summary: dict[str, Any]) -> None:
+    if min(summary["width"], summary["height"]) < MIN_UPLOAD_EDGE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Input is too small for robust X-ray screening. Minimum edge is {MIN_UPLOAD_EDGE}px.",
+        )
+    if not (MIN_ASPECT_RATIO <= summary["aspect_ratio"] <= MAX_ASPECT_RATIO):
+        raise HTTPException(
+            status_code=400,
+            detail="Input aspect ratio is outside the expected chest X-ray range.",
+        )
+    if summary["channel_delta"] > MAX_CHANNEL_DELTA:
+        raise HTTPException(
+            status_code=400,
+            detail="Input appears to be a color image instead of a grayscale-style radiograph.",
+        )
+
+
+def calculate_drift(image: Image.Image) -> dict[str, Any]:
+    gray = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
+    image_mean = float(np.mean(gray))
+    image_std = float(np.std(gray))
+    hist_bins = int(BASELINE_STATS.get("histogram_bins", 32))
+    hist, _ = np.histogram(gray, bins=hist_bins, range=(0.0, 1.0), density=True)
+    baseline_hist = np.asarray(BASELINE_STATS.get("histogram_mean", [1.0 / hist_bins] * hist_bins), dtype=np.float32)
+
+    mean_z = abs(image_mean - BASELINE_STATS.get("pixel_mean_mean", 0.5)) / max(BASELINE_STATS.get("pixel_mean_std", 0.1), 1e-6)
+    std_z = abs(image_std - BASELINE_STATS.get("pixel_std_mean", 0.2)) / max(BASELINE_STATS.get("pixel_std_std", 0.05), 1e-6)
+    hist_distance = float(np.mean(np.abs(hist - baseline_hist)))
+    drift_score = round(0.35 * mean_z + 0.35 * std_z + 0.30 * hist_distance, 6)
+
+    reference_sample = np.asarray(BASELINE_STATS.get("pixel_reference_sample", []), dtype=np.float32)
+    incoming_sample = gray.reshape(-1)
+    if reference_sample.size > 0:
+        sample_size = min(len(incoming_sample), len(reference_sample), 4096)
+        incoming_idx = np.random.choice(len(incoming_sample), size=sample_size, replace=False)
+        reference_idx = np.random.choice(len(reference_sample), size=sample_size, replace=False)
+        _, ks_pvalue = ks_2samp(incoming_sample[incoming_idx], reference_sample[reference_idx])
+        ks_pvalue = float(ks_pvalue)
+    else:
+        ks_pvalue = 1.0
+
+    drift_detected = ks_pvalue < float(BASELINE_STATS.get("drift_ks_pvalue_threshold", 0.05)) or drift_score > float(
+        BASELINE_STATS.get("drift_threshold", 1.2)
+    )
+    return {
+        "drift_alert": "DRIFT_DETECTED" if drift_detected else "NORMAL",
+        "drift_score": drift_score,
+        "ks_pvalue": round(ks_pvalue, 6),
+        "mean_z": round(float(mean_z), 6),
+        "std_z": round(float(std_z), 6),
+        "histogram_distance": round(hist_distance, 6),
+    }
+
+
+def postprocess_probabilities(probabilities: np.ndarray) -> dict[str, Any]:
+    probabilities = probabilities.astype(np.float32)
+    if MULTI_LABEL:
+        predicted_indices = [index for index, value in enumerate(probabilities) if value >= THRESHOLDS[index]]
+        if not predicted_indices:
+            predicted_indices = [int(np.argmax(probabilities))]
+        predicted_labels = [CLASS_NAMES[index] for index in predicted_indices]
+    else:
+        predicted_index = int(np.argmax(probabilities))
+        predicted_indices = [predicted_index]
+        predicted_labels = [CLASS_NAMES[predicted_index]]
+
+    sorted_pairs = sorted(
+        [
+            {
+                "label": CLASS_NAMES[index],
+                "confidence": round(float(probabilities[index]) * 100, 2),
+                "threshold": round(float(THRESHOLDS[index]) * 100, 2) if index < len(THRESHOLDS) else 50.0,
+            }
+            for index in range(len(CLASS_NAMES))
+        ],
+        key=lambda item: item["confidence"],
+        reverse=True,
+    )
+    top_confidence = sorted_pairs[0]["confidence"] if sorted_pairs else 0.0
+    return {
+        "predicted_labels": predicted_labels,
+        "top_predictions": sorted_pairs[: min(5, len(sorted_pairs))],
+        "max_confidence": top_confidence,
+        "low_confidence": top_confidence < (LOW_CONFIDENCE_THRESHOLD * 100.0),
+    }
+
+
+def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
+    if PYTORCH_MODEL is None:
+        raise RuntimeError("PyTorch checkpoint is missing.")
+
+    tensor = TRANSFORM(image).unsqueeze(0).to(DEVICE)
+    start = time.perf_counter()
+    with torch.no_grad():
+        logits = PYTORCH_MODEL(tensor)
+        probabilities = torch.sigmoid(logits).squeeze(0).cpu().numpy() if MULTI_LABEL else torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+    latency_ms = round((time.perf_counter() - start) * 1000, 2)
+    return {
+        "model_key": "pytorch",
+        "model_used": "Baseline PyTorch",
+        "latency_ms": latency_ms,
+        "probabilities": probabilities.tolist(),
+        **postprocess_probabilities(probabilities),
+    }
+
+
+def run_onnx_inference(image: Image.Image) -> dict[str, Any]:
+    if ONNX_SESSION is None:
+        raise RuntimeError("ONNX artifact is missing.")
+
+    tensor = TRANSFORM(image).unsqueeze(0).numpy().astype(np.float32)
+    input_name = ONNX_SESSION.get_inputs()[0].name
+    start = time.perf_counter()
+    outputs = ONNX_SESSION.run(None, {input_name: tensor})
+    latency_ms = round((time.perf_counter() - start) * 1000, 2)
+    logits = torch.from_numpy(outputs[0]).squeeze(0)
+    probabilities = torch.sigmoid(logits).numpy() if MULTI_LABEL else torch.softmax(logits, dim=0).numpy()
+    return {
+        "model_key": "onnx",
+        "model_used": "Optimized ONNX",
+        "latency_ms": latency_ms,
+        "probabilities": probabilities.tolist(),
+        **postprocess_probabilities(probabilities),
+    }
+
+
+async def benchmark_both_models(image: Image.Image) -> dict[str, Any]:
+    async def safe_call(model_name: str, fn):
+        try:
+            result = await asyncio.to_thread(fn, image)
+            LATENCY_HISTOGRAM.labels(model=model_name).observe(result["latency_ms"])
+            return result
+        except Exception as exc:
+            return {"model_key": model_name, "error": str(exc)}
+
+    pytorch_result, onnx_result = await asyncio.gather(
+        safe_call("pytorch", run_pytorch_inference),
+        safe_call("onnx", run_onnx_inference),
+    )
+    return {"pytorch": pytorch_result, "onnx": onnx_result}
+
+
+def build_recommendation(selected_result: dict[str, Any], drift_result: dict[str, Any], dual_results: dict[str, Any]) -> str:
+    if drift_result["drift_alert"] == "DRIFT_DETECTED":
+        return "Input distribution differs from the stored training baseline. Manual review is recommended before trusting this result."
+    if selected_result["low_confidence"]:
+        return "Prediction confidence is below the review threshold. Treat this as low confidence and escalate for human review."
+
+    other_key = "onnx" if selected_result["model_key"] == "pytorch" else "pytorch"
+    other_result = dual_results.get(other_key, {})
+    if other_result.get("predicted_labels") and other_result["predicted_labels"] != selected_result["predicted_labels"]:
+        return "The two serving paths disagree on the predicted findings. Use this as a monitoring alert and fall back to manual review."
+
+    return "Use this output as a triage aid only. PneumoOps monitors latency and drift, but it is not a clinical decision-maker."
+
+
+def append_history(entry: dict[str, Any]) -> None:
+    REQUEST_LOG_HISTORY.append(entry)
+
+
+def emit_structured_log(payload: dict[str, Any]) -> None:
+    logger.info(json.dumps(payload, ensure_ascii=True))
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "profile": PROFILE,
+        "model_dir": str(MODEL_DIR),
+        "pytorch_model_loaded": PYTORCH_MODEL is not None,
+        "onnx_model_loaded": ONNX_SESSION is not None,
+        "active_onnx_model": ACTIVE_ONNX_MODEL_NAME,
+        "class_count": len(CLASS_NAMES),
+        "class_names": CLASS_NAMES,
+        "multi_label": MULTI_LABEL,
+        "training_metrics": load_json(RUNTIME_PATHS["training_metrics"]),
+        "onnx_export_report": load_json(RUNTIME_PATHS["onnx_export_report"]),
+        "recent_requests": list(REQUEST_LOG_HISTORY),
+    }
+
+
+@app.get("/metrics")
+def metrics():
+    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get("/history")
+def history():
+    return {"recent_requests": list(REQUEST_LOG_HISTORY)}
+
+
+@app.post("/predict")
+async def predict(request: Request, file: UploadFile = File(...)):
+    image = load_image_from_upload(file)
+    input_summary = summarize_image(image)
+    validate_image(image, input_summary)
+
+    start = time.perf_counter()
+    dual_results = await benchmark_both_models(image)
+    selected_key = random.choices(["pytorch", "onnx"], weights=[TRAFFIC_WEIGHTS["pytorch"], TRAFFIC_WEIGHTS["onnx"]], k=1)[0]
+    selected_result = dual_results[selected_key]
+    warning_flags = []
+
+    if "error" in selected_result:
+        fallback_result = dual_results["pytorch"]
+        if "error" in fallback_result:
+            REQUEST_COUNTER.labels(model=selected_key, status="failure").inc()
+            raise HTTPException(status_code=503, detail=f"Both inference backends failed: {dual_results}")
+        selected_result = fallback_result
+        warning_flags.append(f"{selected_key.upper()} failed, fallback to PyTorch.")
+
+    drift_result = calculate_drift(image)
+    DRIFT_COUNTER.labels(status=drift_result["drift_alert"]).inc()
+    REQUEST_COUNTER.labels(model=selected_result["model_key"], status="success").inc()
+
+    pytorch_latency = dual_results["pytorch"].get("latency_ms") if "error" not in dual_results["pytorch"] else None
+    onnx_latency = dual_results["onnx"].get("latency_ms") if "error" not in dual_results["onnx"] else None
+    latency_delta = None
+    if pytorch_latency is not None and onnx_latency is not None:
+        latency_delta = round(float(onnx_latency) - float(pytorch_latency), 2)
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    response_payload = {
+        "timestamp": timestamp,
+        "selected_model": selected_result["model_used"],
+        "selected_arm": "A" if selected_result["model_key"] == "pytorch" else "B",
+        "weighted_traffic_split": TRAFFIC_WEIGHTS,
+        "predicted_labels": selected_result["predicted_labels"],
+        "top_predictions": selected_result["top_predictions"],
+        "confidence": selected_result["max_confidence"],
+        "low_confidence": selected_result["low_confidence"],
+        "confidence_review_threshold": LOW_CONFIDENCE_THRESHOLD * 100.0,
+        "pytorch_latency_ms": pytorch_latency,
+        "onnx_latency_ms": onnx_latency,
+        "latency_delta_ms": latency_delta,
+        "drift": drift_result,
+        "input_summary": input_summary,
+        "warning_flags": warning_flags,
+        "recommendation": build_recommendation(selected_result, drift_result, dual_results),
+        "active_onnx_model": ACTIVE_ONNX_MODEL_NAME,
+        "recent_history": list(REQUEST_LOG_HISTORY),
+    }
+
+    history_entry = {
+        "timestamp": timestamp,
+        "model": selected_result["model_used"],
+        "latency_ms": selected_result["latency_ms"],
+        "drift_alert": drift_result["drift_alert"],
+        "confidence": selected_result["max_confidence"],
+        "labels": selected_result["predicted_labels"],
+    }
+    append_history(history_entry)
+    response_payload["recent_history"] = list(REQUEST_LOG_HISTORY)
+
+    emit_structured_log(
+        {
+            "event": "predict",
+            "timestamp": timestamp,
+            "model_used": selected_result["model_used"],
+            "latency_ms": selected_result["latency_ms"],
+            "confidence": selected_result["max_confidence"],
+            "drift_status": drift_result["drift_alert"],
+            "pathologies": selected_result["predicted_labels"],
+            "client": request.client.host if request.client else None,
+        }
+    )
+
+    response_payload["request_latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+    return response_payload
+
+
+gradio_app = build_demo()
+app = gr.mount_gradio_app(app, gradio_app, path="/")
+
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "7860"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

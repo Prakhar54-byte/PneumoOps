@@ -83,9 +83,14 @@ def resolve_path(candidates: list[Path]) -> Path | None:
 
 
 def load_json(path: Path | None, fallback: dict | None = None) -> dict:
+    fallback_dict = {} if fallback is None else fallback
     if path and path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return {} if fallback is None else fallback
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse JSON file {path}, using fallback.")
+            return fallback_dict
+    return fallback_dict
 
 
 def resolve_runtime_paths(model_dir: Path) -> dict[str, Path | None]:

@@ -1,4 +1,4 @@
-# Python cache and build outputs
+# Python
 __pycache__/
 *.py[cod]
 *.so
@@ -6,7 +6,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
-.coverage.*
 htmlcov/
 dist/
 build/
@@ -17,44 +16,41 @@ build/
 venv/
 env/
 
-# Local tool and editor state
-.codex
-.codex/
+# Editor / OS
 .DS_Store
 .idea/
 .vscode/
-.huggingface-spaces/
+.codex
+.codex/
 
-# Environment and secrets
+# Secrets
 .env
 .env.*
 *.local
 
-# Runtime logs and temp files
+# Logs and temp
 *.log
 *.tmp
-*.temp
 
-# Hugging Face and dataset cache
+# Dataset cache (auto-downloaded — not committed)
 data/hf_cache/
 data/*.npz
+data/*.json
 .cache/
 
-# Generated screenshots and local demo assets
+# Screenshots
 Screenshot_*.png
 
-# Large/generated model artifacts
+# ─── Model artifacts (large binaries — stored on HF Hub, not in Git) ─────────
 models/*.pth
 models/*.onnx
-models/*_report.json
-models/*_history.json
-models/*_stats.json
+models/*.json
 models/*.csv
-models/plots/
-models/realworld_densenet121/
-models/realworld_efficientnet_b0/
+models/chestmnist_mobilenetv3/*.pth
+models/chestmnist_mobilenetv3/*.onnx
+models/chestmnist_mobilenetv3/*.npz
+models/chestmnist_mobilenetv3/plots/
 
-# Keep repo structure files available if directories would otherwise disappear
+# Keep directory structure in Git
 !models/.gitkeep
-!models/plots/.gitkeep
 !data/.gitkeep

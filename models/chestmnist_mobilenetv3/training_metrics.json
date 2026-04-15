@@ -1,0 +1,122 @@
+{
+  "architecture": "MobileNetV3-small",
+  "dataset": "ChestMNIST",
+  "class_names": [
+    "Atelectasis",
+    "Cardiomegaly",
+    "Effusion",
+    "Infiltration",
+    "Mass",
+    "Nodule",
+    "Pneumonia",
+    "Pneumothorax",
+    "Consolidation",
+    "Edema",
+    "Emphysema",
+    "Fibrosis",
+    "Pleural_Thickening",
+    "Hernia"
+  ],
+  "num_classes": 14,
+  "epochs": 5,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "image_size": 224,
+  "thresholds": [
+    0.15,
+    0.15,
+    0.2,
+    0.2,
+    0.15,
+    0.1,
+    0.1,
+    0.15,
+    0.1,
+    0.15,
+    0.2,
+    0.1,
+    0.1,
+    0.5
+  ],
+  "multi_label": true,
+  "best_val_loss": 0.1523,
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.1783,
+      "val_loss": 0.1598
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.1594,
+      "val_loss": 0.1556
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.155,
+      "val_loss": 0.1539
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.1524,
+      "val_loss": 0.1528
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.1501,
+      "val_loss": 0.1523
+    }
+  ],
+  "per_class_auroc": {
+    "Atelectasis": 0.7855,
+    "Cardiomegaly": 0.8901,
+    "Effusion": 0.8638,
+    "Infiltration": 0.6976,
+    "Mass": 0.7765,
+    "Nodule": 0.7031,
+    "Pneumonia": 0.7379,
+    "Pneumothorax": 0.8497,
+    "Consolidation": 0.7897,
+    "Edema": 0.8865,
+    "Emphysema": 0.8714,
+    "Fibrosis": 0.8032,
+    "Pleural_Thickening": 0.7538,
+    "Hernia": 0.8499
+  },
+  "per_class_auprc": {
+    "Atelectasis": 0.2999,
+    "Cardiomegaly": 0.2676,
+    "Effusion": 0.494,
+    "Infiltration": 0.3316,
+    "Mass": 0.2198,
+    "Nodule": 0.1663,
+    "Pneumonia": 0.0328,
+    "Pneumothorax": 0.2669,
+    "Consolidation": 0.1399,
+    "Edema": 0.1507,
+    "Emphysema": 0.2582,
+    "Fibrosis": 0.0935,
+    "Pleural_Thickening": 0.1013,
+    "Hernia": 0.0454
+  },
+  "per_class_f1": {
+    "Atelectasis": 0.3709,
+    "Cardiomegaly": 0.3159,
+    "Effusion": 0.5125,
+    "Infiltration": 0.39,
+    "Mass": 0.2786,
+    "Nodule": 0.2207,
+    "Pneumonia": 0.0284,
+    "Pneumothorax": 0.3712,
+    "Consolidation": 0.2163,
+    "Edema": 0.2248,
+    "Emphysema": 0.328,
+    "Fibrosis": 0.169,
+    "Pleural_Thickening": 0.1683,
+    "Hernia": 0.0
+  },
+  "test_macro_roc_auc": 0.8042,
+  "test_macro_auprc": 0.2049,
+  "test_micro_f1": 0.3476,
+  "test_macro_f1": 0.2568
+}

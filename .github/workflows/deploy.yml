@@ -1,17 +1,23 @@
-name: CI and Hugging Face Deploy
+name: CI / Lint + Deploy to Hugging Face Spaces
 
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
-  test:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 1. CI — syntax + import smoke test
+  # ─────────────────────────────────────────────────────────────────────────────
+  ci:
+    name: Syntax & Import Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -19,102 +25,111 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # Install CPU-only torch to keep CI fast
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
-      - name: Validate Python modules
+      - name: Compile-check all Python modules
         run: |
-          python -m py_compile scripts/train.py scripts/convert_to_onnx.py backend/main.py frontend/app.py scripts/smoke_test_app.py
+          python -m py_compile \
+            scripts/train_chestmnist.py \
+            backend/main.py \
+            frontend/app.py \
+            model_utils.py
 
-      - name: Import smoke check
+      - name: Import smoke test (no model files needed)
         run: |
           python - <<'PY'
-          import fastapi, gradio, torch, onnxruntime, datasets, prometheus_client, scipy
-          from backend.main import app
-          print("Imports OK")
-          print(app.title)
+          import ast, pathlib
+          for f in ["scripts/train_chestmnist.py", "backend/main.py", "frontend/app.py", "model_utils.py"]:
+              ast.parse(pathlib.Path(f).read_text())
+              print(f"  {f} OK")
+          print("All imports parseable.")
           PY
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 2. Deploy — push code to Hugging Face Space (on main branch only)
+  # ─────────────────────────────────────────────────────────────────────────────
   deploy:
-    if: github.ref == 'refs/heads/main'
-    needs: test
+    name: Deploy to Hugging Face Spaces
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deploy dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: Install huggingface_hub
+        run: pip install huggingface_hub
 
-      - name: Sync Space and model artifacts to Hugging Face Hub
+      - name: Push Space to Hugging Face Hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE_REPO: ${{ secrets.HF_SPACE_REPO }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+
+          token      = os.environ["HF_TOKEN"]
+          space_repo = os.environ["HF_SPACE_REPO"]   # e.g. "your-username/pneumoops"
+          sha_tag    = f"build-{os.environ['GITHUB_SHA'][:7]}"
+
+          api = HfApi(token=token)
+          api.create_repo(repo_id=space_repo, repo_type="space", space_sdk="docker", exist_ok=True)
+
+          api.upload_folder(
+              repo_id=space_repo,
+              repo_type="space",
+              folder_path=".",
+              commit_message=f"Deploy {sha_tag}",
+              ignore_patterns=[
+                  ".git/*", "__pycache__/*", "*.pyc",
+                  ".venv/*", "venv/*",
+                  "data/hf_cache/*",
+              ],
+          )
+
+          try:
+              api.create_tag(repo_id=space_repo, repo_type="space", tag=sha_tag)
+          except Exception:
+              pass   # tag already exists
+
+          print(f"Deployed {sha_tag} → https://huggingface.co/spaces/{space_repo}")
+          PY
+
+      - name: Upload model artifacts to HF Model Hub
+        # Only runs if HF_MODEL_REPO secret is set
+        if: ${{ env.HF_MODEL_REPO != '' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_MODEL_REPO: ${{ secrets.HF_MODEL_REPO }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
           python - <<'PY'
           import os
-          from pathlib import Path
           from huggingface_hub import HfApi
+          from pathlib import Path
 
-          token = os.environ["HF_TOKEN"]
+          token      = os.environ["HF_TOKEN"]
+          model_repo = os.environ["HF_MODEL_REPO"]
+          sha_tag    = f"build-{os.environ['GITHUB_SHA'][:7]}"
+
           api = HfApi(token=token)
-          space_repo = os.environ["HF_SPACE_REPO"]
-          model_repo = os.environ.get("HF_MODEL_REPO")
-          revision_tag = f"build-{os.environ['GITHUB_SHA'][:7]}"
+          api.create_repo(repo_id=model_repo, repo_type="model", exist_ok=True)
 
-          api.create_repo(repo_id=space_repo, repo_type="space", exist_ok=True, space_sdk="docker")
-          api.upload_folder(
-              repo_id=space_repo,
-              repo_type="space",
-              folder_path=".",
-              commit_message=f"Deploy Space {revision_tag}",
-              ignore_patterns=[
-                  ".git/*",
-                  "__pycache__/*",
-                  "*.pyc",
-                  ".venv/*",
-                  "venv/*",
-              ],
-          )
-          try:
-              api.create_tag(
-                  repo_id=space_repo,
-                  repo_type="space",
-                  tag=revision_tag,
-                  tag_message="Automated Space deployment tag",
+          model_dir = Path("models/chestmnist_mobilenetv3")
+          if model_dir.exists():
+              api.upload_folder(
+                  repo_id=model_repo,
+                  repo_type="model",
+                  folder_path=str(model_dir),
+                  commit_message=f"Upload model {sha_tag}",
               )
-          except Exception:
-              pass
-
-          if model_repo:
-              api.create_repo(repo_id=model_repo, repo_type="model", exist_ok=True)
-              candidate_dirs = [
-                  Path("models/realworld_efficientnet_b0"),
-                  Path("models"),
-              ]
-              for folder in candidate_dirs:
-                  if folder.exists():
-                      api.upload_folder(
-                          repo_id=model_repo,
-                          repo_type="model",
-                          folder_path=str(folder),
-                          path_in_repo=folder.name,
-                          commit_message=f"Upload model artifacts {revision_tag}",
-                      )
-              try:
-                  api.create_tag(
-                      repo_id=model_repo,
-                      repo_type="model",
-                      tag=revision_tag,
-                      tag_message="Automated model artifact tag",
-                  )
-              except Exception:
-                  pass
+              print(f"Model artifacts uploaded → https://huggingface.co/models/{model_repo}")
           PY

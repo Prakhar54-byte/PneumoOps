@@ -14,7 +14,6 @@ import gradio as gr
 import numpy as np
 import onnxruntime as ort
 import torch
-import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
@@ -22,18 +21,22 @@ from PIL import Image
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scipy.stats import ks_2samp
 from torchvision import transforms
-from torchvision.models import efficientnet_b0, mobilenet_v3_small
+from torchvision.models import mobilenet_v3_small, efficientnet_b0
 
-from frontend.app import build_demo
 from model_utils import CalibratedModel
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 LEGACY_MODEL_DIR = BASE_DIR / "models"
 REALWORLD_MODEL_DIR = BASE_DIR / "models" / "realworld_efficientnet_b0"
+CHESTMNIST_MODEL_DIR = BASE_DIR / "models" / "chestmnist_mobilenetv3"
 
-PROFILE = os.getenv("PNEUMOOPS_PROFILE", "prototype").lower()
-MODEL_DIR = Path(os.getenv("PNEUMOOPS_MODEL_DIR", REALWORLD_MODEL_DIR if PROFILE == "realworld" else LEGACY_MODEL_DIR))
+PROFILE = os.getenv("PNEUMOOPS_PROFILE", "realworld").lower()
+_DEFAULT_MODEL_DIR = {
+    "realworld": REALWORLD_MODEL_DIR,
+    "chestmnist": CHESTMNIST_MODEL_DIR,
+}.get(PROFILE, LEGACY_MODEL_DIR)
+MODEL_DIR = Path(os.getenv("PNEUMOOPS_MODEL_DIR", str(_DEFAULT_MODEL_DIR)))
 REQUEST_LOG_HISTORY = deque(maxlen=20)
 
 API_KEY = os.getenv("PNEUMOOPS_API_KEY")
@@ -61,6 +64,11 @@ DRIFT_COUNTER = Counter(
     "Number of drift alerts emitted by PneumoOps.",
     ["status"],
 )
+DISEASE_PREDICTION_COUNTER = Counter(
+    "pneumoops_disease_predictions_total",
+    "Per-disease prediction counts for production monitoring.",
+    ["disease", "model"],
+)
 
 logger = logging.getLogger("pneumoops")
 if not logger.handlers:
@@ -83,6 +91,7 @@ def load_json(path: Path | None, fallback: dict | None = None) -> dict:
 def resolve_runtime_paths(model_dir: Path) -> dict[str, Path | None]:
     checkpoint_path = resolve_path(
         [
+            model_dir / "mobilenetv3_chestmnist.pth",   # chestmnist profile
             model_dir / "realworld_efficientnet_b0.pth",
             model_dir / "pneumo_model.pth",
         ]
@@ -103,6 +112,9 @@ def resolve_runtime_paths(model_dir: Path) -> dict[str, Path | None]:
         onnx_candidates.append(model_dir / base_onnx)
     onnx_candidates.extend(
         [
+            # chestmnist profile
+            model_dir / "mobilenetv3_chestmnist.onnx",
+            # realworld profile
             model_dir / "realworld_efficientnet_b0_quantized.onnx",
             model_dir / "realworld_efficientnet_b0_optimized.onnx",
             model_dir / "realworld_efficientnet_b0.onnx",
@@ -151,17 +163,23 @@ def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
             "multi_label": bool(payload.get("multi_label", True)),
         }
 
+    # Plain state_dict (e.g. from train_chestmnist.py) — pull metadata from training_metrics.json
+    tm_path = MODEL_DIR / "training_metrics.json"
+    tm = load_json(tm_path)
+    class_names = tm.get("class_names", ["Normal", "Pneumonia"])
+    n = len(class_names)
     return {
         "state_dict": payload,
-        "architecture": "mobilenet_v3_small",
-        "class_names": ["Normal", "Pneumonia"],
-        "image_size": 224,
-        "normalize_mean": [0.485, 0.456, 0.406],
-        "normalize_std": [0.229, 0.224, 0.225],
-        "thresholds": [0.5, 0.5],
+        "architecture": tm.get("architecture", "mobilenet_v3_small"),
+        "class_names": class_names,
+        "image_size": int(tm.get("image_size", 224)),
+        "normalize_mean": [0.5, 0.5, 0.5],
+        "normalize_std": [0.5, 0.5, 0.5],
+        "thresholds": tm.get("thresholds", [0.5] * n),
         "logit_temperature": 1.0,
-        "multi_label": False,
+        "multi_label": bool(tm.get("multi_label", True)),
     }
+
 
 
 MODEL_METADATA = load_checkpoint_metadata(RUNTIME_PATHS["checkpoint"])
@@ -478,6 +496,56 @@ def history():
     return {"recent_requests": list(REQUEST_LOG_HISTORY)}
 
 
+@app.get("/metrics/class-rates")
+def class_prediction_rates():
+    """Return per-class prediction rates from the rolling request history."""
+    history_list = list(REQUEST_LOG_HISTORY)
+    total = max(len(history_list), 1)
+    rates: dict[str, float] = {label: 0.0 for label in CLASS_NAMES}
+    avg_confidence: dict[str, list] = {label: [] for label in CLASS_NAMES}
+
+    for entry in history_list:
+        per_class = entry.get("per_class_predictions", {})
+        per_class_probs = entry.get("per_class_probabilities", {})
+        for label in CLASS_NAMES:
+            if per_class.get(label, False):
+                rates[label] = rates[label] + 1
+            if label in per_class_probs:
+                avg_confidence[label].append(per_class_probs[label])
+
+    return {
+        "window_size": total,
+        "per_class_prediction_rate": {
+            label: round(count / total, 4)
+            for label, count in rates.items()
+        },
+        "per_class_avg_confidence": {
+            label: round(float(sum(vals) / len(vals)), 4) if vals else None
+            for label, vals in avg_confidence.items()
+        },
+        "drift_rate": round(
+            sum(1 for e in history_list if e.get("drift_alert") == "DRIFT_DETECTED") / total, 4
+        ),
+    }
+
+
+@app.get("/metrics/calibration")
+def calibration_summary():
+    """Return per-class calibration (Brier scores) from training metrics."""
+    tm = load_json(RUNTIME_PATHS["training_metrics"])
+    return {
+        "test_macro_brier": tm.get("test_macro_brier"),
+        "test_macro_auprc": tm.get("test_macro_auprc"),
+        "test_macro_roc_auc": tm.get("test_macro_roc_auc"),
+        "per_class_brier": tm.get("per_class_brier", {}),
+        "per_class_auprc": tm.get("per_class_auprc", {}),
+        "per_class_roc_auc": tm.get("per_class_roc_auc", {}),
+        "per_class_recall": tm.get("per_class_recall", {}),
+        "threshold_details": tm.get("threshold_details", {}),
+        "class_names": tm.get("class_names", CLASS_NAMES),
+    }
+
+
 @app.post("/predict")
 async def predict(request: Request, file: UploadFile = File(...)):
     image = load_image_from_upload(file)
@@ -497,6 +565,10 @@ async def predict(request: Request, file: UploadFile = File(...)):
             raise HTTPException(status_code=503, detail=f"Both inference backends failed: {dual_results}")
         selected_result = fallback_result
         warning_flags.append(f"{selected_key.upper()} failed, fallback to PyTorch.")
+
+    # Increment per-class disease prediction counters
+    for label in selected_result["predicted_labels"]:
+        DISEASE_PREDICTION_COUNTER.labels(disease=label, model=selected_result["model_key"]).inc()
 
     drift_result = calculate_drift(image)
     DRIFT_COUNTER.labels(status=drift_result["drift_alert"]).inc()
@@ -535,8 +607,18 @@ async def predict(request: Request, file: UploadFile = File(...)):
         "model": selected_result["model_used"],
         "latency_ms": selected_result["latency_ms"],
         "drift_alert": drift_result["drift_alert"],
+        "drift_score": drift_result["drift_score"],
         "confidence": selected_result["max_confidence"],
         "labels": selected_result["predicted_labels"],
+        "per_class_probabilities": {
+            CLASS_NAMES[i]: round(float(selected_result["probabilities"][i]), 4)
+            for i in range(len(CLASS_NAMES))
+            if i < len(selected_result.get("probabilities", []))
+        },
+        "per_class_predictions": {
+            label: (label in selected_result["predicted_labels"])
+            for label in CLASS_NAMES
+        },
     }
     append_history(history_entry)
     response_payload["recent_history"] = list(REQUEST_LOG_HISTORY)
@@ -558,10 +640,7 @@ async def predict(request: Request, file: UploadFile = File(...)):
     return response_payload
 
 
-gradio_app = build_demo()
-app = gr.mount_gradio_app(app, gradio_app, path="/")
-
-
 if __name__ == "__main__":
+    import uvicorn
     port = int(os.getenv("PORT", "7860"))
     uvicorn.run(app, host="0.0.0.0", port=port)

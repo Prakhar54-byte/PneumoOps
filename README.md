@@ -7,7 +7,7 @@ sdk: docker
 app_port: 7860
 pinned: true
 license: mit
-short_description: MLOps pipeline — A/B testing & drift monitoring for chest X-rays
+short_description: MLOps A/B testing & drift monitoring
 ---
 
 # 🫁 PneumoOps
@@ -104,7 +104,7 @@ pneumo_ops/
 ### 1. Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/pneumo_ops
+git clone https://github.com/Prakhar54-byte/PneumoOps
 cd pneumo_ops
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -166,7 +166,7 @@ docker compose up --build
 
 ```bash
 # Add HF remote
-git remote add space https://huggingface.co/spaces/YOUR_USERNAME/pneumoops
+git remote add space https://huggingface.co/spaces/Prakhar54-byte/PneumoOps
 
 # Push (Spaces will build the Docker image automatically)
 git push space main

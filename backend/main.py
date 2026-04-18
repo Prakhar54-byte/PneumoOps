@@ -15,18 +15,23 @@ from typing import Any
 import gradio as gr
 import httpx
 import numpy as np
-import onnxruntime as ort
-import torch
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from PIL import Image
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scipy.stats import ks_2samp
-from torchvision import transforms
-from torchvision.models import mobilenet_v3_small, efficientnet_b0
 
-from model_utils import CalibratedModel
+# Heavy ML deps are optional — not installed on the Railway proxy node.
+try:
+    import torch
+    import onnxruntime as ort
+    from torchvision import transforms
+    from torchvision.models import mobilenet_v3_small, efficientnet_b0
+    from model_utils import CalibratedModel
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -219,16 +224,20 @@ IMAGE_SIZE = int(MODEL_METADATA["image_size"])
 THRESHOLDS = np.asarray(MODEL_METADATA["thresholds"], dtype=np.float32)
 LOGIT_TEMPERATURE = float(MODEL_METADATA.get("logit_temperature", 1.0))
 
-TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.Grayscale(num_output_channels=3),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=MODEL_METADATA["normalize_mean"],
-            std=MODEL_METADATA["normalize_std"],
-        ),
-    ]
+TRANSFORM = (
+    transforms.Compose(
+        [
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.Grayscale(num_output_channels=3),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=MODEL_METADATA["normalize_mean"],
+                std=MODEL_METADATA["normalize_std"],
+            ),
+        ]
+    )
+    if _TORCH_AVAILABLE
+    else None
 )
 
 BASELINE_STATS = load_json(
@@ -248,7 +257,7 @@ BASELINE_STATS = load_json(
 )
 
 
-def build_model() -> torch.nn.Module | None:
+def build_model() -> Any:
     checkpoint_path = RUNTIME_PATHS["checkpoint"]
     if checkpoint_path is None or not checkpoint_path.exists():
         return None
@@ -277,9 +286,9 @@ def build_onnx_session():
     return session, onnx_path.name
 
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-PYTORCH_MODEL = build_model()
-ONNX_SESSION, ACTIVE_ONNX_MODEL_NAME = build_onnx_session()
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") if _TORCH_AVAILABLE else None
+PYTORCH_MODEL = build_model() if _TORCH_AVAILABLE else None
+ONNX_SESSION, ACTIVE_ONNX_MODEL_NAME = build_onnx_session() if _TORCH_AVAILABLE else (None, None)
 
 app = FastAPI(
     title="PneumoOps API",

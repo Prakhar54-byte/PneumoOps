@@ -1,0 +1,12 @@
+fastapi==0.115.12
+gradio==5.25.2
+huggingface_hub==0.31.2
+matplotlib==3.10.1
+numpy==1.26.4
+Pillow==11.1.0
+prometheus-client==0.21.1
+python-multipart==0.0.20
+requests==2.32.3
+scipy==1.15.2
+uvicorn[standard]==0.34.1
+httpx==0.28.1

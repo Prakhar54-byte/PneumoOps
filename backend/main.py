@@ -6,6 +6,7 @@ import os
 import random
 import sys
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +16,7 @@ import gradio as gr
 import numpy as np
 import onnxruntime as ort
 import torch
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from PIL import Image
@@ -43,6 +44,8 @@ REQUEST_LOG_HISTORY = deque(maxlen=20)
 API_KEY = os.getenv("PNEUMOOPS_API_KEY")
 ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("PNEUMOOPS_ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
 TRAFFIC_WEIGHTS = {"pytorch": 60, "onnx": 40}
+COLLECT_DATA = os.getenv("PNEUMOOPS_COLLECT_DATA", "true").lower() == "true"
+COLLECT_DIR = BASE_DIR / "data" / "collected_images"
 LOW_CONFIDENCE_THRESHOLD = float(os.getenv("PNEUMOOPS_LOW_CONFIDENCE_THRESHOLD", "0.60"))
 MIN_UPLOAD_EDGE = int(os.getenv("PNEUMOOPS_MIN_UPLOAD_EDGE", "96"))
 MAX_CHANNEL_DELTA = float(os.getenv("PNEUMOOPS_MAX_CHANNEL_DELTA", "0.08"))
@@ -473,6 +476,25 @@ def emit_structured_log(payload: dict[str, Any]) -> None:
     logger.info(json.dumps(payload, ensure_ascii=True))
 
 
+def save_prediction_data(image: Image.Image, payload: dict[str, Any]) -> None:
+    """Save anonymized image and prediction data for model fine-tuning."""
+    if not COLLECT_DATA:
+        return
+    try:
+        COLLECT_DIR.mkdir(parents=True, exist_ok=True)
+        record_id = str(uuid.uuid4())
+        
+        # Save image
+        img_path = COLLECT_DIR / f"{record_id}.png"
+        image.save(img_path, format="PNG")
+        
+        # Save prediction payload
+        json_path = COLLECT_DIR / f"{record_id}.json"
+        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Failed to save collection data: {e}")
+
+
 @app.get("/health")
 def health():
     return {
@@ -553,7 +575,7 @@ def calibration_summary():
 
 
 @app.post("/predict")
-async def predict(request: Request, file: UploadFile = File(...)):
+async def predict(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     image = load_image_from_upload(file)
     input_summary = summarize_image(image)
     validate_image(image, input_summary)
@@ -643,6 +665,10 @@ async def predict(request: Request, file: UploadFile = File(...)):
     )
 
     response_payload["request_latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
+    
+    # Trigger background save for fine-tuning
+    background_tasks.add_task(save_prediction_data, image, response_payload)
+    
     return response_payload
 
 

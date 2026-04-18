@@ -173,6 +173,26 @@ CSS = """
 }
 .hero h1 { margin: 0 0 0.4rem; font-size: 2rem; letter-spacing: -1px; }
 .hero p  { margin: 0; opacity: 0.85; font-size: 0.95rem; line-height: 1.6; }
+.ethics-banner {
+    background: #fff7ed;
+    border: 2px solid #fb923c;
+    border-radius: 12px;
+    padding: 1rem 1.4rem;
+    margin-bottom: 1rem;
+    font-size: 0.88rem;
+    line-height: 1.6;
+    color: #7c2d12;
+}
+.ethics-banner strong { color: #c2410c; }
+.privacy-note {
+    background: #eff6ff;
+    border-left: 4px solid #3b82f6;
+    border-radius: 6px;
+    padding: 0.6rem 1rem;
+    margin-bottom: 0.5rem;
+    font-size: 0.82rem;
+    color: #1e3a5f;
+}
 """
 
 with gr.Blocks(
@@ -180,6 +200,19 @@ with gr.Blocks(
     css=CSS,
     title="PneumoOps — A/B Testing MLOps Pipeline",
 ) as demo:
+
+    gr.HTML("""
+        <div class="ethics-banner">
+          <strong>⚠️ IMPORTANT DISCLAIMER — READ BEFORE USE</strong><br/>
+          This tool is for <strong>educational and research purposes ONLY</strong> and is <strong>NOT a medical device</strong>.<br/>
+          Predictions <strong>must not be used</strong> for clinical diagnosis, patient care, or any medical decision-making.<br/>
+          Always consult a qualified healthcare professional. Model performance may vary across demographics and scan quality.
+        </div>
+        <div class="privacy-note">
+          🔐 <strong>Data Privacy:</strong> Uploaded images are processed in-memory only. No personally identifiable information is stored.
+          Do <u>not</u> upload images containing patient names, IDs, or other identifying metadata.
+        </div>
+    """)
 
     gr.HTML("""
         <div class="hero">
@@ -220,6 +253,11 @@ with gr.Blocks(
     Pleural Thickening · Hernia
 
     🔴 Critical · 🟠 Significant · 🟣 Standard
+
+    ---
+    > ⚖️ **Responsible AI Notice:** This system *assists in prediction*, it does not confirm diagnoses.
+    > Results are statistical estimates and must be reviewed by a qualified clinician.
+    > See [ETHICS.md](https://github.com/Prakhar54-byte/PneumoOps/blob/master/ETHICS.md) for our full Responsible AI policy.
     """)
 
     submit_btn.click(

@@ -14,7 +14,7 @@ short_description: MLOps pipeline — A/B testing & drift monitoring for chest X
 
 **Continuous MLOps Pipeline with A/B Testing & Data Drift Monitoring for 14-Class Thoracic Disease Detection**
 
-[![CI](https://github.com/YOUR_USERNAME/pneumo_ops/actions/workflows/deploy.yml/badge.svg)](https://github.com/YOUR_USERNAME/pneumo_ops/actions)
+[![CI](https://github.com/Prakhar54-byte/PneumoOps/actions/workflows/deploy.yml/badge.svg)](https://github.com/Prakhar54-byte/PneumoOps/actions)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](#)
 

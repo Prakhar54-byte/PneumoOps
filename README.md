@@ -147,7 +147,7 @@ Key endpoints:
 
 ```bash
 BACKEND_PREDICT_URL=http://127.0.0.1:7860/predict python3 frontend/app.py
-# Open http://localhost:7861
+
 ```
 
 ### 5. Docker (full stack)

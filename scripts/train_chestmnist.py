@@ -13,8 +13,13 @@ Usage (quick, shared-server-safe):
 
 import argparse
 import json
+import logging
 import time
 from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 import numpy as np
 import onnx
@@ -196,9 +201,52 @@ def train_epoch(model: nn.Module, loader: DataLoader,
     return total_loss / max(len(loader), 1)
 
 
+def save_training_plots(history: list[dict], test_metrics: dict, output_dir: Path):
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 1. Learning Curve
+    epochs = [h["epoch"] for h in history]
+    train_loss = [h["train_loss"] for h in history]
+    val_loss = [h["val_loss"] for h in history]
+    
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, train_loss, label="Train Loss", marker="o", color="#2563eb")
+    plt.plot(epochs, val_loss, label="Val Loss", marker="o", color="#dc2626")
+    plt.title("Training & Validation Loss Curve")
+    plt.xlabel("Epoch")
+    plt.ylabel("BCE Loss")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(plots_dir / "loss_curve.png", dpi=150)
+    plt.close()
+
+    # 2. Per-class metrics bar chart
+    auroc = test_metrics["per_class_auroc"]
+    auprc = test_metrics["per_class_auprc"]
+    labels = [k for k in auroc.keys() if auroc[k] is not None]
+    auroc_vals = [auroc[k] for k in labels]
+    auprc_vals = [auprc[k] for k in labels]
+    
+    y = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.barh(y - 0.2, auroc_vals, height=0.4, label="AUROC", color="#3b82f6")
+    ax.barh(y + 0.2, auprc_vals, height=0.4, label="AUPRC", color="#10b981")
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontweight="bold")
+    ax.set_xlim(0, 1.05)
+    ax.set_title("Per-Class AUROC & AUPRC", fontweight="bold")
+    ax.grid(axis="x", alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig(plots_dir / "per_class_metrics.png", dpi=150)
+    plt.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train MobileNetV3-small on ChestMNIST (14-class multi-label)")
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=15)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--image-size", type=int, default=224)
@@ -303,6 +351,10 @@ def main():
     (args.output_dir / "training_metrics.json").write_text(
         json.dumps(training_metrics, indent=2), encoding="utf-8"
     )
+    
+    # Save Professional Plots
+    print("\nGenerating training & evaluation plots…")
+    save_training_plots(history, test_metrics, args.output_dir)
     print(f"\n  Macro AUROC : {test_metrics['test_macro_roc_auc']}")
     print(f"  Macro AUPRC : {test_metrics['test_macro_auprc']}")
     print(f"  Micro  F1   : {test_metrics['test_micro_f1']}")

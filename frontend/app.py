@@ -24,6 +24,8 @@ import numpy as np
 import requests
 from PIL import Image
 
+# When running embedded inside FastAPI (HF Spaces), the backend is on the same process.
+# When running standalone via docker-compose, override with BACKEND_PREDICT_URL env var.
 BACKEND_URL = os.getenv("BACKEND_PREDICT_URL", "http://127.0.0.1:7860/predict")
 
 CHESTMNIST_CLASSES = [
@@ -228,5 +230,6 @@ with gr.Blocks(
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("GRADIO_PORT", "7861"))
+    port = int(os.getenv("GRADIO_PORT", "7860"))
     demo.launch(server_name="0.0.0.0", server_port=port)
+

@@ -1,3 +1,15 @@
+---
+title: PneumoOps
+emoji: 🫁
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: true
+license: mit
+short_description: MLOps pipeline — A/B testing & drift monitoring for chest X-rays
+---
+
 # 🫁 PneumoOps
 
 **Continuous MLOps Pipeline with A/B Testing & Data Drift Monitoring for 14-Class Thoracic Disease Detection**

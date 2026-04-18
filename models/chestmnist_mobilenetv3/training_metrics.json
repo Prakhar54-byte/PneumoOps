@@ -18,105 +18,155 @@
     "Hernia"
   ],
   "num_classes": 14,
-  "epochs": 5,
+  "epochs": 15,
   "batch_size": 32,
   "learning_rate": 0.001,
   "image_size": 224,
   "thresholds": [
-    0.15,
-    0.15,
     0.2,
+    0.15,
+    0.25,
     0.2,
+    0.15,
+    0.1,
+    0.5,
     0.15,
     0.1,
     0.1,
     0.15,
-    0.1,
-    0.15,
-    0.2,
     0.1,
     0.1,
     0.5
   ],
   "multi_label": true,
-  "best_val_loss": 0.1523,
+  "best_val_loss": 0.1511,
   "history": [
     {
       "epoch": 1,
-      "train_loss": 0.1783,
-      "val_loss": 0.1598
+      "train_loss": 0.1781,
+      "val_loss": 0.1591
     },
     {
       "epoch": 2,
-      "train_loss": 0.1594,
-      "val_loss": 0.1556
+      "train_loss": 0.1586,
+      "val_loss": 0.1547
     },
     {
       "epoch": 3,
-      "train_loss": 0.155,
-      "val_loss": 0.1539
+      "train_loss": 0.1545,
+      "val_loss": 0.153
     },
     {
       "epoch": 4,
-      "train_loss": 0.1524,
-      "val_loss": 0.1528
+      "train_loss": 0.1517,
+      "val_loss": 0.1519
     },
     {
       "epoch": 5,
-      "train_loss": 0.1501,
-      "val_loss": 0.1523
+      "train_loss": 0.1496,
+      "val_loss": 0.1519
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.1478,
+      "val_loss": 0.1511
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.146,
+      "val_loss": 0.1512
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.1443,
+      "val_loss": 0.152
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.1428,
+      "val_loss": 0.152
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.1413,
+      "val_loss": 0.152
+    },
+    {
+      "epoch": 11,
+      "train_loss": 0.1399,
+      "val_loss": 0.1526
+    },
+    {
+      "epoch": 12,
+      "train_loss": 0.1386,
+      "val_loss": 0.1544
+    },
+    {
+      "epoch": 13,
+      "train_loss": 0.137,
+      "val_loss": 0.1536
+    },
+    {
+      "epoch": 14,
+      "train_loss": 0.1356,
+      "val_loss": 0.1547
+    },
+    {
+      "epoch": 15,
+      "train_loss": 0.134,
+      "val_loss": 0.1559
     }
   ],
   "per_class_auroc": {
-    "Atelectasis": 0.7855,
-    "Cardiomegaly": 0.8901,
-    "Effusion": 0.8638,
-    "Infiltration": 0.6976,
-    "Mass": 0.7765,
-    "Nodule": 0.7031,
-    "Pneumonia": 0.7379,
-    "Pneumothorax": 0.8497,
-    "Consolidation": 0.7897,
-    "Edema": 0.8865,
-    "Emphysema": 0.8714,
-    "Fibrosis": 0.8032,
-    "Pleural_Thickening": 0.7538,
-    "Hernia": 0.8499
+    "Atelectasis": 0.787,
+    "Cardiomegaly": 0.894,
+    "Effusion": 0.8679,
+    "Infiltration": 0.6993,
+    "Mass": 0.7819,
+    "Nodule": 0.7006,
+    "Pneumonia": 0.7558,
+    "Pneumothorax": 0.8535,
+    "Consolidation": 0.7868,
+    "Edema": 0.8848,
+    "Emphysema": 0.873,
+    "Fibrosis": 0.8002,
+    "Pleural_Thickening": 0.7577,
+    "Hernia": 0.8757
   },
   "per_class_auprc": {
-    "Atelectasis": 0.2999,
-    "Cardiomegaly": 0.2676,
-    "Effusion": 0.494,
-    "Infiltration": 0.3316,
-    "Mass": 0.2198,
-    "Nodule": 0.1663,
-    "Pneumonia": 0.0328,
-    "Pneumothorax": 0.2669,
-    "Consolidation": 0.1399,
-    "Edema": 0.1507,
-    "Emphysema": 0.2582,
-    "Fibrosis": 0.0935,
-    "Pleural_Thickening": 0.1013,
-    "Hernia": 0.0454
+    "Atelectasis": 0.308,
+    "Cardiomegaly": 0.2844,
+    "Effusion": 0.5018,
+    "Infiltration": 0.3297,
+    "Mass": 0.2325,
+    "Nodule": 0.1687,
+    "Pneumonia": 0.0425,
+    "Pneumothorax": 0.2811,
+    "Consolidation": 0.1412,
+    "Edema": 0.1476,
+    "Emphysema": 0.2651,
+    "Fibrosis": 0.0952,
+    "Pleural_Thickening": 0.1069,
+    "Hernia": 0.0419
   },
   "per_class_f1": {
-    "Atelectasis": 0.3709,
-    "Cardiomegaly": 0.3159,
-    "Effusion": 0.5125,
-    "Infiltration": 0.39,
-    "Mass": 0.2786,
-    "Nodule": 0.2207,
-    "Pneumonia": 0.0284,
-    "Pneumothorax": 0.3712,
-    "Consolidation": 0.2163,
-    "Edema": 0.2248,
-    "Emphysema": 0.328,
-    "Fibrosis": 0.169,
-    "Pleural_Thickening": 0.1683,
+    "Atelectasis": 0.3587,
+    "Cardiomegaly": 0.3368,
+    "Effusion": 0.5178,
+    "Infiltration": 0.3906,
+    "Mass": 0.2883,
+    "Nodule": 0.2232,
+    "Pneumonia": 0.0,
+    "Pneumothorax": 0.3755,
+    "Consolidation": 0.2189,
+    "Edema": 0.215,
+    "Emphysema": 0.317,
+    "Fibrosis": 0.1239,
+    "Pleural_Thickening": 0.1788,
     "Hernia": 0.0
   },
-  "test_macro_roc_auc": 0.8042,
-  "test_macro_auprc": 0.2049,
-  "test_micro_f1": 0.3476,
-  "test_macro_f1": 0.2568
+  "test_macro_roc_auc": 0.8084,
+  "test_macro_auprc": 0.2105,
+  "test_micro_f1": 0.3425,
+  "test_macro_f1": 0.2532
 }

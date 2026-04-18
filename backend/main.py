@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import random
+import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -645,7 +646,30 @@ async def predict(request: Request, file: UploadFile = File(...)):
     return response_payload
 
 
+# ─── Mount Gradio UI into FastAPI (single-port for HF Spaces) ───────────────
+# This allows the entire app (API + UI) to run on one port (7860).
+# - FastAPI REST endpoints remain at /predict, /health, /metrics, etc.
+# - Gradio UI is served at / (root)
+
+try:
+    # Dynamically add frontend dir to path so app.py can be imported
+    _frontend_dir = str(BASE_DIR / "frontend")
+    if _frontend_dir not in sys.path:
+        sys.path.insert(0, _frontend_dir)
+
+    import gradio as gr
+    from frontend.app import demo as gradio_demo  # the gr.Blocks() object
+
+    # Mount Gradio at root; FastAPI routes take priority because they're
+    # registered first via @app.get / @app.post decorators.
+    app = gr.mount_gradio_app(app, gradio_demo, path="/ui")
+    logger.info("Gradio UI mounted at /ui — full app on single port.")
+except Exception as _e:
+    logger.warning(f"Gradio mount skipped ({_e}). API-only mode active.")
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "7860"))
     uvicorn.run(app, host="0.0.0.0", port=port)
+

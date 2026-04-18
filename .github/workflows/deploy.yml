@@ -1,4 +1,4 @@
-name: CI / Lint + Deploy to Hugging Face Spaces
+name: CI / Lint + Deploy
 
 on:
   push:
@@ -133,3 +133,22 @@ jobs:
               )
               print(f"Model artifacts uploaded → https://huggingface.co/models/{model_repo}")
           PY
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 3. Deploy — push backend+frontend to Railway (on main branch only)
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy-railway:
+    name: Deploy to Railway
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --service pneumoops-backend --detach

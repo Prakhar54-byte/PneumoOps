@@ -1,35 +1,30 @@
 version: "3.9"
 
 services:
-  backend:
+  # ─── Single container: FastAPI + Gradio on port 7860 ─────────────────────
+  # This mirrors the HF Spaces deployment (single exposed port).
+  # Access:
+  #   UI  →  http://localhost:7860/ui
+  #   API →  http://localhost:7860/predict
+  #   Health → http://localhost:7860/health
+  app:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
       - "7860:7860"
     volumes:
-      - ./models:/app/models
+      - ./models:/app/models   # hot-swap model files without rebuilding
     environment:
       - PYTHONPATH=/app
       - PNEUMOOPS_PROFILE=chestmnist
+      - PORT=7860
+      # Optional: set PNEUMOOPS_API_KEY to protect /predict in production
+      # - PNEUMOOPS_API_KEY=change-me
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:7860/health"]
       interval: 30s
       timeout: 5s
-      start_period: 30s
+      start_period: 40s
       retries: 3
-
-  frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "7861:7861"
-    environment:
-      - PYTHONPATH=/app
-      - BACKEND_PREDICT_URL=http://backend:7860/predict
-      - GRADIO_PORT=7861
-    command: ["python", "frontend/app_simple.py"]
-    depends_on:
-      backend:
-        condition: service_healthy

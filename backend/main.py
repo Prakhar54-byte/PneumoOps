@@ -151,6 +151,39 @@ def resolve_runtime_paths(model_dir: Path) -> dict[str, Path | None]:
     }
 
 
+def download_models_if_missing() -> None:
+    """Download model weights from HF Hub at startup if not present locally.
+    Only runs on the HF Spaces inference node (HF_SPACES_URL not set)."""
+    if HF_SPACES_URL:
+        return  # proxy node — no local models needed
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return
+
+    hf_model_repo = os.getenv("HF_MODEL_REPO", "Prakhar54-byte/pneumoops-chestmnist")
+    hf_token = os.getenv("HF_TOKEN")
+    files = ["mobilenetv3_chestmnist.pth", "mobilenetv3_chestmnist.onnx"]
+
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    for filename in files:
+        dest = MODEL_DIR / filename
+        if dest.exists():
+            continue
+        try:
+            logger.info(f"Downloading {filename} from {hf_model_repo}...")
+            hf_hub_download(
+                repo_id=hf_model_repo,
+                filename=filename,
+                local_dir=str(MODEL_DIR),
+                token=hf_token,
+            )
+            logger.info(f"Downloaded {filename} successfully.")
+        except Exception as exc:
+            logger.warning(f"Could not download {filename}: {exc}")
+
+
+download_models_if_missing()
 RUNTIME_PATHS = resolve_runtime_paths(MODEL_DIR)
 
 

@@ -820,15 +820,15 @@ try:
     import gradio as gr
     from frontend.app import demo as gradio_demo  # the gr.Blocks() object
 
-    # Mount Gradio at /ui; FastAPI routes take priority because they're
-    # registered first via @app.get / @app.post decorators.
-    app = gr.mount_gradio_app(app, gradio_demo, path="/ui")
-    logger.info("Gradio UI mounted at /ui — full app on single port.")
-    
     from fastapi.responses import RedirectResponse
     @app.get("/")
     def redirect_to_ui():
         return RedirectResponse(url="/ui")
+
+    # Mount Gradio at /ui; FastAPI routes take priority because they're
+    # registered first via @app.get / @app.post decorators.
+    app = gr.mount_gradio_app(app, gradio_demo, path="/ui")
+    logger.info("Gradio UI mounted at /ui — full app on single port.")
 
 except Exception as _e:
     logger.warning(f"Gradio mount skipped ({_e}). API-only mode active.")

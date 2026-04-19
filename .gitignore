@@ -51,6 +51,10 @@ models/chestmnist_mobilenetv3/*.onnx
 models/chestmnist_mobilenetv3/*.npz
 models/chestmnist_mobilenetv3/plots/
 
-# Keep directory structure in Git
+# Keep directory structure and metadata JSON files in Git.
+# The JSON files (training_metrics.json, baseline_stats.json, onnx_export_report.json)
+# are needed by the Railway proxy backend to resolve class names and thresholds at startup.
 !models/.gitkeep
 !data/.gitkeep
+!models/chestmnist_mobilenetv3/*.json
+!models/chestmnist_mobilenetv3/README.md

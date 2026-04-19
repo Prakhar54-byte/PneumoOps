@@ -13,19 +13,25 @@ from pathlib import Path
 from typing import Any
 
 import gradio as gr
+import httpx
 import numpy as np
-import onnxruntime as ort
-import torch
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from PIL import Image
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scipy.stats import ks_2samp
-from torchvision import transforms
-from torchvision.models import mobilenet_v3_small, efficientnet_b0
 
-from model_utils import CalibratedModel
+# Heavy ML deps are optional — not installed on the Railway proxy node.
+try:
+    import torch
+    import onnxruntime as ort
+    from torchvision import transforms
+    from torchvision.models import mobilenet_v3_small, efficientnet_b0
+    from model_utils import CalibratedModel
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -44,6 +50,9 @@ REQUEST_LOG_HISTORY = deque(maxlen=20)
 API_KEY = os.getenv("PNEUMOOPS_API_KEY")
 ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("PNEUMOOPS_ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
 TRAFFIC_WEIGHTS = {"pytorch": 60, "onnx": 40}
+# When set, all model inference is forwarded to this HF Spaces URL instead of local models.
+# Example: https://prakhar54-byte-pneumoops.hf.space
+HF_SPACES_URL = os.getenv("HF_SPACES_URL", "").rstrip("/")
 COLLECT_DATA = os.getenv("PNEUMOOPS_COLLECT_DATA", "true").lower() == "true"
 COLLECT_DIR = BASE_DIR / "data" / "collected_images"
 LOW_CONFIDENCE_THRESHOLD = float(os.getenv("PNEUMOOPS_LOW_CONFIDENCE_THRESHOLD", "0.60"))
@@ -147,6 +156,23 @@ RUNTIME_PATHS = resolve_runtime_paths(MODEL_DIR)
 
 def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
     if checkpoint_path is None or not checkpoint_path.exists():
+        # Proxy/backend-only deployments have no model weights but do have
+        # training_metrics.json — use it so class names and thresholds are correct.
+        tm_path = MODEL_DIR / "training_metrics.json"
+        tm = load_json(tm_path)
+        if tm.get("class_names"):
+            class_names = tm["class_names"]
+            n = len(class_names)
+            return {
+                "architecture": tm.get("architecture", "mobilenet_v3_small"),
+                "class_names": class_names,
+                "image_size": int(tm.get("image_size", 224)),
+                "normalize_mean": [0.5, 0.5, 0.5],
+                "normalize_std": [0.5, 0.5, 0.5],
+                "thresholds": tm.get("thresholds", [0.5] * n),
+                "logit_temperature": 1.0,
+                "multi_label": bool(tm.get("multi_label", True)),
+            }
         return {
             "architecture": "mobilenet_v3_small",
             "class_names": ["Normal", "Pneumonia"],
@@ -198,16 +224,20 @@ IMAGE_SIZE = int(MODEL_METADATA["image_size"])
 THRESHOLDS = np.asarray(MODEL_METADATA["thresholds"], dtype=np.float32)
 LOGIT_TEMPERATURE = float(MODEL_METADATA.get("logit_temperature", 1.0))
 
-TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.Grayscale(num_output_channels=3),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=MODEL_METADATA["normalize_mean"],
-            std=MODEL_METADATA["normalize_std"],
-        ),
-    ]
+TRANSFORM = (
+    transforms.Compose(
+        [
+            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.Grayscale(num_output_channels=3),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=MODEL_METADATA["normalize_mean"],
+                std=MODEL_METADATA["normalize_std"],
+            ),
+        ]
+    )
+    if _TORCH_AVAILABLE
+    else None
 )
 
 BASELINE_STATS = load_json(
@@ -227,7 +257,7 @@ BASELINE_STATS = load_json(
 )
 
 
-def build_model() -> torch.nn.Module | None:
+def build_model() -> Any:
     checkpoint_path = RUNTIME_PATHS["checkpoint"]
     if checkpoint_path is None or not checkpoint_path.exists():
         return None
@@ -256,9 +286,9 @@ def build_onnx_session():
     return session, onnx_path.name
 
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-PYTORCH_MODEL = build_model()
-ONNX_SESSION, ACTIVE_ONNX_MODEL_NAME = build_onnx_session()
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") if _TORCH_AVAILABLE else None
+PYTORCH_MODEL = build_model() if _TORCH_AVAILABLE else None
+ONNX_SESSION, ACTIVE_ONNX_MODEL_NAME = build_onnx_session() if _TORCH_AVAILABLE else (None, None)
 
 app = FastAPI(
     title="PneumoOps API",
@@ -438,7 +468,8 @@ def run_onnx_inference(image: Image.Image) -> dict[str, Any]:
     }
 
 
-async def benchmark_both_models(image: Image.Image) -> dict[str, Any]:
+async def _run_local_inference(image: Image.Image) -> dict[str, Any]:
+    """Run both models in-process — used when model weights are available locally."""
     async def safe_call(model_name: str, fn):
         try:
             result = await asyncio.to_thread(fn, image)
@@ -452,6 +483,45 @@ async def benchmark_both_models(image: Image.Image) -> dict[str, Any]:
         safe_call("onnx", run_onnx_inference),
     )
     return {"pytorch": pytorch_result, "onnx": onnx_result}
+
+
+async def _call_hf_infer(image: Image.Image) -> dict[str, Any]:
+    """Forward dual-model inference to the HF Spaces node via /infer."""
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    buf.seek(0)
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        resp = await client.post(
+            f"{HF_SPACES_URL}/infer",
+            files={"file": ("xray.png", buf.read(), "image/png")},
+        )
+        resp.raise_for_status()
+    data = resp.json()
+
+    result: dict[str, Any] = {}
+    for key in ("pytorch", "onnx"):
+        raw = data.get(key) or {}
+        if "error" in raw:
+            result[key] = {"model_key": key, "error": raw["error"]}
+        else:
+            probs = np.asarray(raw.get("probabilities", []), dtype=np.float32)
+            latency = float(raw.get("latency_ms") or 0.0)
+            LATENCY_HISTOGRAM.labels(model=key).observe(latency)
+            result[key] = {
+                "model_key": key,
+                "model_used": "Baseline PyTorch" if key == "pytorch" else "Optimized ONNX",
+                "latency_ms": latency,
+                "probabilities": probs.tolist(),
+                **postprocess_probabilities(probs),
+            }
+    return result
+
+
+async def benchmark_both_models(image: Image.Image) -> dict[str, Any]:
+    """Route dual-model inference to HF Spaces (proxy mode) or local models."""
+    if HF_SPACES_URL:
+        return await _call_hf_infer(image)
+    return await _run_local_inference(image)
 
 
 def build_recommendation(selected_result: dict[str, Any], drift_result: dict[str, Any], dual_results: dict[str, Any]) -> str:
@@ -499,6 +569,8 @@ def save_prediction_data(image: Image.Image, payload: dict[str, Any]) -> None:
 def health():
     return {
         "status": "ok",
+        "deployment_mode": "proxy" if HF_SPACES_URL else "local",
+        "hf_spaces_url": HF_SPACES_URL or None,
         "profile": PROFILE,
         "model_dir": str(MODEL_DIR),
         "pytorch_model_loaded": PYTORCH_MODEL is not None,
@@ -670,6 +742,35 @@ async def predict(request: Request, background_tasks: BackgroundTasks, file: Upl
     background_tasks.add_task(save_prediction_data, image, response_payload)
     
     return response_payload
+
+
+@app.post("/infer")
+async def infer_raw(file: UploadFile = File(...)):
+    """Raw dual-model inference for remote backend nodes.
+    Returns probabilities from both PyTorch and ONNX arms with no side-effects
+    (no metrics, no drift, no history). Only available on the HF Spaces inference node
+    (i.e. when HF_SPACES_URL is not set)."""
+    if HF_SPACES_URL:
+        raise HTTPException(
+            status_code=501,
+            detail="This node is a proxy backend; /infer is only served by the inference node.",
+        )
+    image = load_image_from_upload(file)
+    dual = await _run_local_inference(image)
+    out: dict[str, Any] = {}
+    for key in ("pytorch", "onnx"):
+        r = dual.get(key, {})
+        out[key] = (
+            {"probabilities": r.get("probabilities", []), "latency_ms": r.get("latency_ms")}
+            if "error" not in r
+            else {"error": r["error"]}
+        )
+    return {
+        **out,
+        "class_names": CLASS_NAMES,
+        "thresholds": THRESHOLDS.tolist(),
+        "multi_label": MULTI_LABEL,
+    }
 
 
 # ─── Mount Gradio UI into FastAPI (single-port for HF Spaces) ───────────────

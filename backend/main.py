@@ -16,7 +16,15 @@ from typing import Any
 import gradio as gr
 import httpx
 import numpy as np
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    File,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from PIL import Image
@@ -32,6 +40,7 @@ try:
     from torchvision import transforms
     from torchvision.models import mobilenet_v3_small, efficientnet_b0
     from model_utils import CalibratedModel
+
     _TORCH_AVAILABLE = True
 except ImportError:
     _TORCH_AVAILABLE = False
@@ -51,14 +60,20 @@ MODEL_DIR = Path(os.getenv("PNEUMOOPS_MODEL_DIR", str(_DEFAULT_MODEL_DIR)))
 REQUEST_LOG_HISTORY = deque(maxlen=20)
 
 API_KEY = os.getenv("PNEUMOOPS_API_KEY")
-ALLOWED_ORIGINS = [origin.strip() for origin in os.getenv("PNEUMOOPS_ALLOWED_ORIGINS", "*").split(",") if origin.strip()]
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("PNEUMOOPS_ALLOWED_ORIGINS", "*").split(",")
+    if origin.strip()
+]
 TRAFFIC_WEIGHTS = {"pytorch": 60, "onnx": 40}
 # When set, all model inference is forwarded to this HF Spaces URL instead of local models.
 # Example: https://prakhar54-byte-pneumoops.hf.space
 HF_SPACES_URL = os.getenv("HF_SPACES_URL", "").rstrip("/")
 COLLECT_DATA = os.getenv("PNEUMOOPS_COLLECT_DATA", "true").lower() == "true"
 COLLECT_DIR = BASE_DIR / "data" / "collected_images"
-LOW_CONFIDENCE_THRESHOLD = float(os.getenv("PNEUMOOPS_LOW_CONFIDENCE_THRESHOLD", "0.60"))
+LOW_CONFIDENCE_THRESHOLD = float(
+    os.getenv("PNEUMOOPS_LOW_CONFIDENCE_THRESHOLD", "0.60")
+)
 MIN_UPLOAD_EDGE = int(os.getenv("PNEUMOOPS_MIN_UPLOAD_EDGE", "96"))
 MAX_CHANNEL_DELTA = float(os.getenv("PNEUMOOPS_MAX_CHANNEL_DELTA", "0.08"))
 MIN_ASPECT_RATIO = float(os.getenv("PNEUMOOPS_MIN_ASPECT_RATIO", "0.6"))
@@ -112,12 +127,17 @@ def load_json(path: Path | None, fallback: dict | None = None) -> dict:
 def resolve_runtime_paths(model_dir: Path) -> dict[str, Path | None]:
     checkpoint_path = resolve_path(
         [
-            model_dir / "mobilenetv3_chestmnist.pth",   # chestmnist profile
+            model_dir / "mobilenetv3_chestmnist.pth",  # chestmnist profile
             model_dir / "realworld_efficientnet_b0.pth",
             model_dir / "pneumo_model.pth",
         ]
     )
-    onnx_report_path = resolve_path([model_dir / "onnx_export_report.json", LEGACY_MODEL_DIR / "onnx_export_report.json"])
+    onnx_report_path = resolve_path(
+        [
+            model_dir / "onnx_export_report.json",
+            LEGACY_MODEL_DIR / "onnx_export_report.json",
+        ]
+    )
     onnx_report = load_json(onnx_report_path)
 
     base_onnx = onnx_report.get("base_onnx")
@@ -148,8 +168,18 @@ def resolve_runtime_paths(model_dir: Path) -> dict[str, Path | None]:
     return {
         "checkpoint": checkpoint_path,
         "onnx": resolve_path(onnx_candidates),
-        "training_metrics": resolve_path([model_dir / "training_metrics.json", LEGACY_MODEL_DIR / "training_metrics.json"]),
-        "baseline_stats": resolve_path([model_dir / "baseline_stats.json", LEGACY_MODEL_DIR / "baseline_stats.json"]),
+        "training_metrics": resolve_path(
+            [
+                model_dir / "training_metrics.json",
+                LEGACY_MODEL_DIR / "training_metrics.json",
+            ]
+        ),
+        "baseline_stats": resolve_path(
+            [
+                model_dir / "baseline_stats.json",
+                LEGACY_MODEL_DIR / "baseline_stats.json",
+            ]
+        ),
         "onnx_export_report": onnx_report_path,
     }
 
@@ -220,6 +250,23 @@ def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
             "multi_label": False,
         }
 
+    # If torch is not available, fall back to loading metadata from training_metrics.json
+    if not _TORCH_AVAILABLE:
+        tm_path = MODEL_DIR / "training_metrics.json"
+        tm = load_json(tm_path)
+        class_names = tm.get("class_names", ["Normal", "Pneumonia"])
+        n = len(class_names)
+        return {
+            "architecture": tm.get("architecture", "mobilenet_v3_small"),
+            "class_names": class_names,
+            "image_size": int(tm.get("image_size", 224)),
+            "normalize_mean": [0.485, 0.456, 0.406],
+            "normalize_std": [0.229, 0.224, 0.225],
+            "thresholds": tm.get("thresholds", [0.5] * n),
+            "logit_temperature": 1.0,
+            "multi_label": bool(tm.get("multi_label", True)),
+        }
+
     payload = torch.load(checkpoint_path, map_location="cpu")
     if isinstance(payload, dict) and "model_state_dict" in payload:
         return {
@@ -229,7 +276,9 @@ def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
             "image_size": int(payload.get("image_size", 320)),
             "normalize_mean": payload.get("normalize_mean", [0.485, 0.456, 0.406]),
             "normalize_std": payload.get("normalize_std", [0.229, 0.224, 0.225]),
-            "thresholds": payload.get("thresholds", [0.5] * len(payload.get("class_names", ["No Finding"]))),
+            "thresholds": payload.get(
+                "thresholds", [0.5] * len(payload.get("class_names", ["No Finding"]))
+            ),
             "logit_temperature": float(payload.get("logit_temperature", 1.0)),
             "multi_label": bool(payload.get("multi_label", True)),
         }
@@ -250,7 +299,6 @@ def load_checkpoint_metadata(checkpoint_path: Path | None) -> dict[str, Any]:
         "logit_temperature": 1.0,
         "multi_label": bool(tm.get("multi_label", True)),
     }
-
 
 
 MODEL_METADATA = load_checkpoint_metadata(RUNTIME_PATHS["checkpoint"])
@@ -302,10 +350,14 @@ def build_model() -> Any:
     num_outputs = len(CLASS_NAMES)
     if architecture == "efficientnet_b0":
         base_model = efficientnet_b0(weights=None)
-        base_model.classifier[1] = torch.nn.Linear(base_model.classifier[1].in_features, num_outputs)
+        base_model.classifier[1] = torch.nn.Linear(
+            base_model.classifier[1].in_features, num_outputs
+        )
     else:
         base_model = mobilenet_v3_small(weights=None)
-        base_model.classifier[3] = torch.nn.Linear(base_model.classifier[3].in_features, num_outputs)
+        base_model.classifier[3] = torch.nn.Linear(
+            base_model.classifier[3].in_features, num_outputs
+        )
 
     base_model.load_state_dict(MODEL_METADATA["state_dict"])
     model = CalibratedModel(base_model, LOGIT_TEMPERATURE)
@@ -322,9 +374,15 @@ def build_onnx_session():
     return session, onnx_path.name
 
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu") if _TORCH_AVAILABLE else None
+DEVICE = (
+    torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if _TORCH_AVAILABLE
+    else None
+)
 PYTORCH_MODEL = build_model() if _TORCH_AVAILABLE else None
-ONNX_SESSION, ACTIVE_ONNX_MODEL_NAME = build_onnx_session() if _TORCH_AVAILABLE else (None, None)
+ONNX_SESSION, ACTIVE_ONNX_MODEL_NAME = (
+    build_onnx_session() if _TORCH_AVAILABLE else (None, None)
+)
 
 app = FastAPI(
     title="PneumoOps API",
@@ -353,18 +411,23 @@ def load_image_from_upload(upload: UploadFile) -> Image.Image:
         content = upload.file.read()
         return Image.open(io.BytesIO(content)).convert("RGB")
     except Exception as exc:
-        raise HTTPException(status_code=400, detail="Uploaded file is not a valid image.") from exc
+        raise HTTPException(
+            status_code=400, detail="Uploaded file is not a valid image."
+        ) from exc
 
 
 def summarize_image(image: Image.Image) -> dict[str, Any]:
     gray = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
     width, height = image.size
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
-    channel_delta = float(
-        np.mean(np.abs(rgb[:, :, 0] - rgb[:, :, 1]))
-        + np.mean(np.abs(rgb[:, :, 1] - rgb[:, :, 2]))
-        + np.mean(np.abs(rgb[:, :, 0] - rgb[:, :, 2]))
-    ) / 3.0
+    channel_delta = (
+        float(
+            np.mean(np.abs(rgb[:, :, 0] - rgb[:, :, 1]))
+            + np.mean(np.abs(rgb[:, :, 1] - rgb[:, :, 2]))
+            + np.mean(np.abs(rgb[:, :, 0] - rgb[:, :, 2]))
+        )
+        / 3.0
+    )
     return {
         "width": width,
         "height": height,
@@ -401,27 +464,42 @@ def calculate_drift(image: Image.Image) -> dict[str, Any]:
     image_std = float(np.std(gray))
     hist_bins = int(BASELINE_STATS.get("histogram_bins", 32))
     hist, _ = np.histogram(gray, bins=hist_bins, range=(0.0, 1.0), density=True)
-    baseline_hist = np.asarray(BASELINE_STATS.get("histogram_mean", [1.0 / hist_bins] * hist_bins), dtype=np.float32)
+    baseline_hist = np.asarray(
+        BASELINE_STATS.get("histogram_mean", [1.0 / hist_bins] * hist_bins),
+        dtype=np.float32,
+    )
 
-    mean_z = abs(image_mean - BASELINE_STATS.get("pixel_mean_mean", 0.5)) / max(BASELINE_STATS.get("pixel_mean_std", 0.1), 1e-6)
-    std_z = abs(image_std - BASELINE_STATS.get("pixel_std_mean", 0.2)) / max(BASELINE_STATS.get("pixel_std_std", 0.05), 1e-6)
+    mean_z = abs(image_mean - BASELINE_STATS.get("pixel_mean_mean", 0.5)) / max(
+        BASELINE_STATS.get("pixel_mean_std", 0.1), 1e-6
+    )
+    std_z = abs(image_std - BASELINE_STATS.get("pixel_std_mean", 0.2)) / max(
+        BASELINE_STATS.get("pixel_std_std", 0.05), 1e-6
+    )
     hist_distance = float(np.mean(np.abs(hist - baseline_hist)))
     drift_score = round(0.35 * mean_z + 0.35 * std_z + 0.30 * hist_distance, 6)
 
-    reference_sample = np.asarray(BASELINE_STATS.get("pixel_reference_sample", []), dtype=np.float32)
+    reference_sample = np.asarray(
+        BASELINE_STATS.get("pixel_reference_sample", []), dtype=np.float32
+    )
     incoming_sample = gray.reshape(-1)
     if reference_sample.size > 0:
         sample_size = min(len(incoming_sample), len(reference_sample), 4096)
-        incoming_idx = np.random.choice(len(incoming_sample), size=sample_size, replace=False)
-        reference_idx = np.random.choice(len(reference_sample), size=sample_size, replace=False)
-        _, ks_pvalue = ks_2samp(incoming_sample[incoming_idx], reference_sample[reference_idx])
+        incoming_idx = np.random.choice(
+            len(incoming_sample), size=sample_size, replace=False
+        )
+        reference_idx = np.random.choice(
+            len(reference_sample), size=sample_size, replace=False
+        )
+        _, ks_pvalue = ks_2samp(
+            incoming_sample[incoming_idx], reference_sample[reference_idx]
+        )
         ks_pvalue = float(ks_pvalue)
     else:
         ks_pvalue = 1.0
 
-    drift_detected = ks_pvalue < float(BASELINE_STATS.get("drift_ks_pvalue_threshold", 0.05)) or drift_score > float(
-        BASELINE_STATS.get("drift_threshold", 1.2)
-    )
+    drift_detected = ks_pvalue < float(
+        BASELINE_STATS.get("drift_ks_pvalue_threshold", 0.05)
+    ) or drift_score > float(BASELINE_STATS.get("drift_threshold", 1.2))
     return {
         "drift_alert": "DRIFT_DETECTED" if drift_detected else "NORMAL",
         "drift_score": drift_score,
@@ -435,7 +513,11 @@ def calculate_drift(image: Image.Image) -> dict[str, Any]:
 def postprocess_probabilities(probabilities: np.ndarray) -> dict[str, Any]:
     probabilities = probabilities.astype(np.float32)
     if MULTI_LABEL:
-        predicted_indices = [index for index, value in enumerate(probabilities) if value >= THRESHOLDS[index]]
+        predicted_indices = [
+            index
+            for index, value in enumerate(probabilities)
+            if value >= THRESHOLDS[index]
+        ]
         if not predicted_indices:
             predicted_indices = [int(np.argmax(probabilities))]
         predicted_labels = [CLASS_NAMES[index] for index in predicted_indices]
@@ -448,12 +530,16 @@ def postprocess_probabilities(probabilities: np.ndarray) -> dict[str, Any]:
         {
             "label": CLASS_NAMES[index],
             "confidence": round(float(probabilities[index]) * 100, 2),
-            "threshold": round(float(THRESHOLDS[index]) * 100, 2) if index < len(THRESHOLDS) else 50.0,
-            "detected": index in predicted_indices
+            "threshold": round(float(THRESHOLDS[index]) * 100, 2)
+            if index < len(THRESHOLDS)
+            else 50.0,
+            "detected": index in predicted_indices,
         }
         for index in range(len(CLASS_NAMES))
     ]
-    sorted_pairs = sorted(all_predictions, key=lambda item: item["confidence"], reverse=True)
+    sorted_pairs = sorted(
+        all_predictions, key=lambda item: item["confidence"], reverse=True
+    )
     top_confidence = sorted_pairs[0]["confidence"] if sorted_pairs else 0.0
 
     return {
@@ -465,26 +551,33 @@ def postprocess_probabilities(probabilities: np.ndarray) -> dict[str, Any]:
         "inconclusive_scan": top_confidence < 10.0,
     }
 
+
 class CAMHook:
     def __init__(self, module):
         self.hook_f = module.register_forward_hook(self.hook_fn_fwd)
         self.hook_b = module.register_full_backward_hook(self.hook_fn_bwd)
         self.features = None
         self.gradients = None
+
     def hook_fn_fwd(self, module, input, output):
         self.features = output
+
     def hook_fn_bwd(self, module, grad_in, grad_out):
         self.gradients = grad_out[0]
+
     def remove(self):
         self.hook_f.remove()
         self.hook_b.remove()
+
 
 def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
     cam = cam_tensor.detach().cpu().numpy()
     cam = np.maximum(cam, 0)
     cam = cam - np.min(cam)
     cam = cam / (np.max(cam) + 1e-8)
-    cam_img = Image.fromarray(np.uint8(255 * cam)).resize(image.size, Image.Resampling.BILINEAR)
+    cam_img = Image.fromarray(np.uint8(255 * cam)).resize(
+        image.size, Image.Resampling.BILINEAR
+    )
     cam_resized = np.array(cam_img) / 255.0
     colormap = cm.get_cmap("jet")(cam_resized)[:, :, :3]
     heatmap = np.uint8(255 * colormap)
@@ -502,27 +595,31 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
 
     tensor = TRANSFORM(image).unsqueeze(0).to(DEVICE)
     tensor.requires_grad_(True)
-    
+
     # Try to hook the last conv layer for MobileNetV3 or EfficientNet
     target_layer = None
     if hasattr(PYTORCH_MODEL.base_model, "features"):
         target_layer = PYTORCH_MODEL.base_model.features[-1]
-    
+
     cam_hook = CAMHook(target_layer) if target_layer else None
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     start = time.perf_counter()
-    
+
     # Enable gradients to compute CAM
     with torch.set_grad_enabled(True):
         logits = PYTORCH_MODEL(tensor)
-    
+
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     latency_ms = round((time.perf_counter() - start) * 1000, 2)
-    
-    probabilities = torch.sigmoid(logits).squeeze(0).detach().cpu().numpy() if MULTI_LABEL else torch.softmax(logits, dim=1).squeeze(0).detach().cpu().numpy()
+
+    probabilities = (
+        torch.sigmoid(logits).squeeze(0).detach().cpu().numpy()
+        if MULTI_LABEL
+        else torch.softmax(logits, dim=1).squeeze(0).detach().cpu().numpy()
+    )
 
     cam_b64 = None
     if cam_hook:
@@ -557,7 +654,11 @@ def run_onnx_inference(image: Image.Image) -> dict[str, Any]:
     outputs = ONNX_SESSION.run(None, {input_name: tensor})
     latency_ms = round((time.perf_counter() - start) * 1000, 2)
     logits = torch.from_numpy(outputs[0]).squeeze(0)
-    probabilities = torch.sigmoid(logits).numpy() if MULTI_LABEL else torch.softmax(logits, dim=0).numpy()
+    probabilities = (
+        torch.sigmoid(logits).numpy()
+        if MULTI_LABEL
+        else torch.softmax(logits, dim=0).numpy()
+    )
     return {
         "model_key": "onnx",
         "model_used": "Optimized ONNX",
@@ -569,6 +670,7 @@ def run_onnx_inference(image: Image.Image) -> dict[str, Any]:
 
 async def _run_local_inference(image: Image.Image) -> dict[str, Any]:
     """Run both models in-process — used when model weights are available locally."""
+
     async def safe_call(model_name: str, fn):
         try:
             result = await asyncio.to_thread(fn, image)
@@ -608,7 +710,9 @@ async def _call_hf_infer(image: Image.Image) -> dict[str, Any]:
             LATENCY_HISTOGRAM.labels(model=key).observe(latency)
             result[key] = {
                 "model_key": key,
-                "model_used": "Baseline PyTorch" if key == "pytorch" else "Optimized ONNX",
+                "model_used": "Baseline PyTorch"
+                if key == "pytorch"
+                else "Optimized ONNX",
                 "latency_ms": latency,
                 "probabilities": probs.tolist(),
                 **postprocess_probabilities(probs),
@@ -623,7 +727,11 @@ async def benchmark_both_models(image: Image.Image) -> dict[str, Any]:
     return await _run_local_inference(image)
 
 
-def build_recommendation(selected_result: dict[str, Any], drift_result: dict[str, Any], dual_results: dict[str, Any]) -> str:
+def build_recommendation(
+    selected_result: dict[str, Any],
+    drift_result: dict[str, Any],
+    dual_results: dict[str, Any],
+) -> str:
     if drift_result["drift_alert"] == "DRIFT_DETECTED":
         return "Input distribution differs from the stored training baseline. Manual review is recommended before trusting this result."
     if selected_result["low_confidence"]:
@@ -631,7 +739,10 @@ def build_recommendation(selected_result: dict[str, Any], drift_result: dict[str
 
     other_key = "onnx" if selected_result["model_key"] == "pytorch" else "pytorch"
     other_result = dual_results.get(other_key, {})
-    if other_result.get("predicted_labels") and other_result["predicted_labels"] != selected_result["predicted_labels"]:
+    if (
+        other_result.get("predicted_labels")
+        and other_result["predicted_labels"] != selected_result["predicted_labels"]
+    ):
         return "The two serving paths disagree on the predicted findings. Use this as a monitoring alert and fall back to manual review."
 
     return "Use this output as a triage aid only. PneumoOps monitors latency and drift, but it is not a clinical decision-maker."
@@ -652,11 +763,11 @@ def save_prediction_data(image: Image.Image, payload: dict[str, Any]) -> None:
     try:
         COLLECT_DIR.mkdir(parents=True, exist_ok=True)
         record_id = str(uuid.uuid4())
-        
+
         # Save image
         img_path = COLLECT_DIR / f"{record_id}.png"
         image.save(img_path, format="PNG")
-        
+
         # Save prediction payload
         json_path = COLLECT_DIR / f"{record_id}.json"
         json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -715,15 +826,16 @@ def class_prediction_rates():
     return {
         "window_size": total,
         "per_class_prediction_rate": {
-            label: round(count / total, 4)
-            for label, count in rates.items()
+            label: round(count / total, 4) for label, count in rates.items()
         },
         "per_class_avg_confidence": {
             label: round(float(sum(vals) / len(vals)), 4) if vals else None
             for label, vals in avg_confidence.items()
         },
         "drift_rate": round(
-            sum(1 for e in history_list if e.get("drift_alert") == "DRIFT_DETECTED") / total, 4
+            sum(1 for e in history_list if e.get("drift_alert") == "DRIFT_DETECTED")
+            / total,
+            4,
         ),
     }
 
@@ -746,14 +858,20 @@ def calibration_summary():
 
 
 @app.post("/predict")
-async def predict(request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def predict(
+    request: Request, background_tasks: BackgroundTasks, file: UploadFile = File(...)
+):
     image = load_image_from_upload(file)
     input_summary = summarize_image(image)
     validate_image(image, input_summary)
 
     start = time.perf_counter()
     dual_results = await benchmark_both_models(image)
-    selected_key = random.choices(["pytorch", "onnx"], weights=[TRAFFIC_WEIGHTS["pytorch"], TRAFFIC_WEIGHTS["onnx"]], k=1)[0]
+    selected_key = random.choices(
+        ["pytorch", "onnx"],
+        weights=[TRAFFIC_WEIGHTS["pytorch"], TRAFFIC_WEIGHTS["onnx"]],
+        k=1,
+    )[0]
     selected_result = dual_results[selected_key]
     warning_flags = []
 
@@ -761,20 +879,33 @@ async def predict(request: Request, background_tasks: BackgroundTasks, file: Upl
         fallback_result = dual_results["pytorch"]
         if "error" in fallback_result:
             REQUEST_COUNTER.labels(model=selected_key, status="failure").inc()
-            raise HTTPException(status_code=503, detail=f"Both inference backends failed: {dual_results}")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Both inference backends failed: {dual_results}",
+            )
         selected_result = fallback_result
         warning_flags.append(f"{selected_key.upper()} failed, fallback to PyTorch.")
 
     # Increment per-class disease prediction counters
     for label in selected_result["predicted_labels"]:
-        DISEASE_PREDICTION_COUNTER.labels(disease=label, model=selected_result["model_key"]).inc()
+        DISEASE_PREDICTION_COUNTER.labels(
+            disease=label, model=selected_result["model_key"]
+        ).inc()
 
     drift_result = calculate_drift(image)
     DRIFT_COUNTER.labels(status=drift_result["drift_alert"]).inc()
     REQUEST_COUNTER.labels(model=selected_result["model_key"], status="success").inc()
 
-    pytorch_latency = dual_results["pytorch"].get("latency_ms") if "error" not in dual_results["pytorch"] else None
-    onnx_latency = dual_results["onnx"].get("latency_ms") if "error" not in dual_results["onnx"] else None
+    pytorch_latency = (
+        dual_results["pytorch"].get("latency_ms")
+        if "error" not in dual_results["pytorch"]
+        else None
+    )
+    onnx_latency = (
+        dual_results["onnx"].get("latency_ms")
+        if "error" not in dual_results["onnx"]
+        else None
+    )
     latency_delta = None
     if pytorch_latency is not None and onnx_latency is not None:
         latency_delta = round(float(onnx_latency) - float(pytorch_latency), 2)
@@ -799,7 +930,9 @@ async def predict(request: Request, background_tasks: BackgroundTasks, file: Upl
         "drift": drift_result,
         "input_summary": input_summary,
         "warning_flags": warning_flags,
-        "recommendation": build_recommendation(selected_result, drift_result, dual_results),
+        "recommendation": build_recommendation(
+            selected_result, drift_result, dual_results
+        ),
         "active_onnx_model": ACTIVE_ONNX_MODEL_NAME,
         "recent_history": list(REQUEST_LOG_HISTORY),
         "cam_b64": dual_results["pytorch"].get("cam_b64"),
@@ -839,11 +972,13 @@ async def predict(request: Request, background_tasks: BackgroundTasks, file: Upl
         }
     )
 
-    response_payload["request_latency_ms"] = round((time.perf_counter() - start) * 1000, 2)
-    
+    response_payload["request_latency_ms"] = round(
+        (time.perf_counter() - start) * 1000, 2
+    )
+
     # Trigger background save for fine-tuning
     background_tasks.add_task(save_prediction_data, image, response_payload)
-    
+
     return response_payload
 
 
@@ -864,7 +999,10 @@ async def infer_raw(file: UploadFile = File(...)):
     for key in ("pytorch", "onnx"):
         r = dual.get(key, {})
         out[key] = (
-            {"probabilities": r.get("probabilities", []), "latency_ms": r.get("latency_ms")}
+            {
+                "probabilities": r.get("probabilities", []),
+                "latency_ms": r.get("latency_ms"),
+            }
             if "error" not in r
             else {"error": r["error"]}
         )
@@ -891,6 +1029,7 @@ try:
     from frontend.app import demo as gradio_demo  # the gr.Blocks() object
 
     from fastapi.responses import RedirectResponse
+
     @app.get("/")
     def redirect_to_ui():
         return RedirectResponse(url="/ui")
@@ -904,9 +1043,8 @@ except Exception as _e:
     logger.warning(f"Gradio mount skipped ({_e}). API-only mode active.")
 
 
-
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.getenv("PORT", "7860"))
     uvicorn.run(app, host="0.0.0.0", port=port)
-

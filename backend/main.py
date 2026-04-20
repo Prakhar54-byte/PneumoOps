@@ -543,7 +543,7 @@ def postprocess_probabilities(probabilities: np.ndarray) -> dict[str, Any]:
 
     return {
         "predicted_labels": predicted_labels,
-        "all_predictions": all_predictions, "summary": "No finding reached the 30% clinically noteworthy threshold.",
+        "all_predictions": all_predictions, "summary": "Clinical Review Recommended: No findings reached the 30% threshold, but observation is advised for top results.",
         "top_predictions": sorted_pairs[: min(5, len(sorted_pairs))],
         "max_confidence": top_confidence,
         "low_confidence": top_confidence < (LOW_CONFIDENCE_THRESHOLD * 100.0),
@@ -574,20 +574,24 @@ def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
     try:
         cam = cam_tensor.detach().cpu().numpy()
         cam = np.maximum(cam, 0)
-        cam = cam - np.min(cam)
-        cam_max = np.max(cam)
-        if cam_max > 1e-12:
-            cam = cam / cam_max
-        cam_img = Image.fromarray(np.uint8(255 * cam)).resize(image.size, Image.Resampling.BILINEAR)
-        cam_resized = np.array(cam_img) / 255.0
-        colormap = cm.get_cmap("jet")(cam_resized)[:, :, :3]
+        # Contrast stretch
+        cam = (cam - np.min(cam)) / (np.max(cam) - np.min(cam) + 1e-12)
+        
+        # High-res upsampling (LANCZOS)
+        w, h = image.size
+        cam_img = Image.fromarray(np.uint8(255 * cam)).resize((w, h), Image.Resampling.LANCZOS)
+        
+        colormap = cm.get_cmap('jet')(np.array(cam_img) / 255.0)[:, :, :3]
         heatmap = np.uint8(255 * colormap)
-        img_np = np.array(image.convert("RGB"))
-        overlay = np.uint8(0.5 * img_np + 0.5 * heatmap)
-        out_img = Image.fromarray(overlay)
+        overlay = np.uint8(0.7 * np.array(image.convert('RGB')) + 0.3 * heatmap)
+        
         buf = io.BytesIO()
-        out_img.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode("utf-8")
+        Image.fromarray(overlay).save(buf, format='PNG')
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    except Exception as e:
+        buf = io.BytesIO()
+        image.save(buf, format='PNG')
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
     except Exception as e:
         logger.warning(f"CAM overlay generation failed: {e}, returning original image")
         buf = io.BytesIO()

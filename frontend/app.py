@@ -199,7 +199,7 @@ def predict(image: Image.Image, api_url: str):
     else:
         out_image = image
         
-    summary_html = f'<div class="custom-card" style="border-left: 4px solid #3b82f6; background: #1e293b;"><div class="metric-title">CLINICAL SUMMARY</div><div style="font-size:1.1rem; font-weight:500;">{payload.get("summary", "No summary available")}</div></div>'
+    summary_html = f'<div class="custom-card" style="border-left: 4px solid #3b82f6; background: #1e293b; padding: 15px; margin-bottom: 10px;"><div class="metric-title">CLINICAL SUMMARY</div><div style="font-size:1.1rem; font-weight:500; color:#f8fafc;">{payload.get("summary", "Screening complete.")}</div></div>'
     return arm_html, lat_html, summary_html, qc_html, top3_html, classes_html, calib_html, out_image
 
 CSS = """
@@ -248,6 +248,7 @@ with gr.Blocks(theme=gr.themes.Base(), css=CSS, title="PneumoOps Redesigned") as
                 lat_out = gr.HTML()
                 
             summary_out = gr.HTML()
+            summary_out = gr.HTML()
             qc_out = gr.HTML()
             top3_out = gr.HTML()
             classes_out = gr.HTML()
@@ -267,6 +268,7 @@ with gr.Blocks(theme=gr.themes.Base(), css=CSS, title="PneumoOps Redesigned") as
     submit_btn.click(
         fn=predict,
         inputs=[image_input, api_url],
+        outputs=[arm_out, lat_out, summary_out, qc_out, top3_out, classes_out, calib_out, analyzed_img_out],
         outputs=[arm_out, lat_out, summary_out, qc_out, top3_out, classes_out, calib_out, analyzed_img_out],
     )
 

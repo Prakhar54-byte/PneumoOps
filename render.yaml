@@ -12,4 +12,4 @@ services:
       - key: GRADIO_TEMP_DIR
         value: /tmp
       - key: PORT
-        fromPort: 10000 # Render default, code handles this
+        value: 10000 # Render default, code handles this

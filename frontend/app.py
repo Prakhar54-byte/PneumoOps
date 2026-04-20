@@ -22,8 +22,8 @@ def call_backend(image: Image.Image, api_url: str) -> dict:
 
 def render_top_metrics(payload: dict) -> tuple[str, str]:
     model_arm = payload.get("selected_model", "Unknown")
-    latency_ms = payload.get("latency_ms", -1)
-    
+    latency_ms = max(payload.get("latency_ms", 0), 0)
+
     latency_html = f'<div class="metric-value">{latency_ms} ms</div>'
     if latency_ms < 0:
         latency_html = f'''
@@ -255,8 +255,6 @@ with gr.Blocks(theme=gr.themes.Base(), css=CSS, title="PneumoOps Redesigned") as
                 arm_out = gr.HTML()
                 lat_out = gr.HTML()
                 
-            summary_out = gr.HTML()
-            ethics_out = gr.HTML()
             summary_out = gr.HTML()
             ethics_out = gr.HTML()
             qc_out = gr.HTML()

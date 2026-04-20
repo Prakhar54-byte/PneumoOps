@@ -556,19 +556,15 @@ class CAMHook:
 
     def __init__(self, module):
         self.hook_f = module.register_forward_hook(self.hook_fn_fwd)
-        self.hook_b = module.register_full_backward_hook(self.hook_fn_bwd)
+        # Score-CAM only needs forward hooks
         self.features = None
-        self.gradients = None
+        
 
     def hook_fn_fwd(self, module, input, output):
         self.features = output.detach()
 
-    def hook_fn_bwd(self, module, grad_in, grad_out):
-        self.gradients = grad_out[0].detach()
-
     def remove(self):
         self.hook_f.remove()
-        self.hook_b.remove()
 
 def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
     try:
@@ -639,14 +635,36 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
             try:
                 logger.info(f"Computing CAM for class index {class_idx}")
                 PYTORCH_MODEL.zero_grad()
-                logits[0, class_idx].backward(retain_graph=True)
-                if cam_hook.features is not None and cam_hook.gradients is not None:
-                    weights = torch.mean(cam_hook.gradients, dim=[0, 2, 3], keepdim=True)
-                    cam_tensor = torch.sum(weights * cam_hook.features, dim=1).squeeze()
+                
+                # SCORE-CAM Implementation
+                with torch.no_grad():
+                    activations = cam_hook.features[0]  # [C, H, W]
+                    num_channels = activations.shape[0]
+            
+                    # Upsample activations to match model input (224x224)
+                    upsampled = torch.nn.functional.interpolate(
+                        activations.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False
+                    ).squeeze(0)  # [C, 224, 224]
+            
+                    # Normalize masks
+                    upsampled = (upsampled - upsampled.min()) / (upsampled.max() - upsampled.min() + 1e-8)
+            
+                    # Batch process masked images to get scores
+                    # We use a representative subset of channels if there are too many (e.g. 576) to keep latency low
+                    # For MobileNetV3 small, we'll take top 128 channels or all if less
+                    step = max(1, num_channels // 128)
+                    subset_indices = list(range(0, num_channels, step))
+            
+                    masked_images = tensor * upsampled[subset_indices].unsqueeze(1) # [N, 3, 224, 224]
+            
+                    # Get scores for the target class
+                    scores = PYTORCH_MODEL(masked_images)[:, class_idx]
+                    scores = torch.nn.functional.softmax(scores, dim=0)
+            
+                    # Weighted sum of activations
+                    cam_tensor = torch.sum(activations[subset_indices] * scores.view(-1, 1, 1), dim=0)
                     cam_b64 = generate_cam_overlay(image, cam_tensor)
                     logger.info("CAM overlay generated successfully")
-                else:
-                    logger.warning(f"CAM missing data: features={cam_hook.features is not None}, gradients={cam_hook.gradients is not None}")
             except Exception as e:
                 logger.error(f"CAM computation failed: {e}")
             finally:

@@ -570,34 +570,16 @@ class CAMHook:
         self.hook_f.remove()
         self.hook_b.remove()
 
-def generate_cam_overlay(image: Image.Image, cam_tensor: "torch.Tensor") -> str:
-    cam = cam_tensor.detach().cpu().numpy()
-    cam = np.maximum(cam, 0)
-    cam = cam - np.min(cam)
-    cam = cam / (np.max(cam) + 1e-8)
-    cam_img = Image.fromarray(np.uint8(255 * cam)).resize(
-        image.size, Image.Resampling.BILINEAR
-    )
-    cam_resized = np.array(cam_img) / 255.0
-    colormap = cm.get_cmap("jet")(cam_resized)[:, :, :3]
-    heatmap = np.uint8(255 * colormap)
-    img_np = np.array(image.convert("RGB"))
-    overlay = np.uint8(0.6 * img_np + 0.4 * heatmap)
-    out_img = Image.fromarray(overlay)
-    buf = io.BytesIO()
-    out_img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
 def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
     try:
         cam = cam_tensor.detach().cpu().numpy()
         cam = np.maximum(cam, 0)
         cam = cam - np.min(cam)
         cam_max = np.max(cam)
-        if cam_max < 1e-8:
-            logger.warning("CAM values too small, returning original image")
-            raise ValueError("CAM values too small")
-        cam = cam / cam_max
+        
+        if cam_max > 1e-12:
+            cam = cam / cam_max
+        
         cam_img = Image.fromarray(np.uint8(255 * cam)).resize(
             image.size, Image.Resampling.BILINEAR
         )
@@ -616,8 +598,6 @@ def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
         image.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-
-
 def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
     if PYTORCH_MODEL is None:
         raise RuntimeError("PyTorch checkpoint is missing.")
@@ -628,17 +608,18 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
     target_layer = None
     if hasattr(PYTORCH_MODEL.base_model, "features"):
         features = PYTORCH_MODEL.base_model.features
-        for child in reversed(list(features.children())):
-            if isinstance(child, torch.nn.Conv2d):
-                target_layer = child
-                break
+        def find_last_conv(m):
+            last_conv = None
+            for name, module in m.named_modules():
+                if isinstance(module, torch.nn.Conv2d):
+                    last_conv = module
+            return last_conv
+        target_layer = find_last_conv(features)
         if target_layer is None:
             target_layer = features[-1]
-            logger.info(
-                f"Using features[-1] as target layer: {type(target_layer).__name__}"
-            )
+            logger.info(f"Using features[-1] as fallback target layer: {type(target_layer).__name__}")
         else:
-            logger.info(f"Found Conv2d target layer: {type(target_layer).__name__}")
+            logger.info(f"Found deep Conv2d target layer: {type(target_layer).__name__}")
     else:
         logger.warning("No features attribute found on model for CAM")
 
@@ -658,40 +639,31 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
 
     with torch.set_grad_enabled(True):
         logits = PYTORCH_MODEL(tensor)
+        probs_tensor = (torch.sigmoid(logits).squeeze(0) if MULTI_LABEL else torch.softmax(logits, dim=1).squeeze(0))
+        probabilities = probs_tensor.detach().cpu().numpy()
+        class_idx = int(np.argmax(probabilities))
+        
+        cam_b64 = None
+        if cam_hook:
+            try:
+                logger.info(f"Computing CAM for class index {class_idx}")
+                PYTORCH_MODEL.zero_grad()
+                logits[0, class_idx].backward(retain_graph=True)
+                if cam_hook.features is not None and cam_hook.gradients is not None:
+                    weights = torch.mean(cam_hook.gradients, dim=[0, 2, 3], keepdim=True)
+                    cam_tensor = torch.sum(weights * cam_hook.features, dim=1).squeeze()
+                    cam_b64 = generate_cam_overlay(image, cam_tensor)
+                    logger.info("CAM overlay generated successfully")
+                else:
+                    logger.warning(f"CAM missing data: features={cam_hook.features is not None}, gradients={cam_hook.gradients is not None}")
+            except Exception as e:
+                logger.error(f"CAM computation failed: {e}")
+            finally:
+                cam_hook.remove()
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     latency_ms = round((time.perf_counter() - start) * 1000, 2)
-
-    probabilities = (
-        torch.sigmoid(logits).squeeze(0).detach().cpu().numpy()
-        if MULTI_LABEL
-        else torch.softmax(logits, dim=1).squeeze(0).detach().cpu().numpy()
-    )
-
-    cam_b64 = None
-    if cam_hook:
-        try:
-            class_idx = int(np.argmax(probabilities))
-            logger.info(f"Computing CAM for class index {class_idx}")
-            PYTORCH_MODEL.zero_grad()
-            logits[0, class_idx].backward(retain_graph=True)
-            if cam_hook.features is not None and cam_hook.gradients is not None:
-                logger.info(f"CAM features shape: {cam_hook.features.shape}")
-                logger.info(f"CAM gradients shape: {cam_hook.gradients.shape}")
-                pooled_gradients = torch.mean(cam_hook.gradients, dim=[0, 2, 3])
-                for i in range(cam_hook.features.shape[1]):
-                    cam_hook.features[:, i, :, :] *= pooled_gradients[i]
-                cam_tensor = torch.mean(cam_hook.features, dim=1).squeeze()
-                logger.info(f"CAM tensor shape: {cam_tensor.shape}")
-                cam_b64 = generate_cam_overlay(image, cam_tensor)
-                logger.info("CAM overlay generated successfully")
-            else:
-                logger.warning("CAM features or gradients are None")
-        except Exception as e:
-            logger.error(f"CAM computation failed: {e}")
-        finally:
-            cam_hook.remove()
 
     return {
         "model_key": "pytorch",
@@ -701,7 +673,6 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
         "cam_b64": cam_b64,
         **postprocess_probabilities(probabilities),
     }
-
 
 def run_onnx_inference(image: Image.Image) -> dict[str, Any]:
     if ONNX_SESSION is None:

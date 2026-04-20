@@ -90,7 +90,7 @@ def build_top3_chart(top_predictions: list[dict]) -> object:
     ax.set_yticks(y)
     ax.set_yticklabels(labels, fontsize=13, fontweight="bold")
     ax.set_xlim(0, 1.15)
-    ax.set_xlabel("Confidence Score", fontsize=11)
+    ax.set_xlabel("Confidence Score (Raw Probability)", fontsize=11)
     ax.set_title("Top-3 Predicted Pathologies", fontsize=13, fontweight="bold", pad=10)
     ax.grid(axis="x", alpha=0.25, zorder=0)
 
@@ -120,7 +120,7 @@ def drift_badge(status: str) -> str:
     return (
         "<div style='padding:0.8rem 1.2rem;border-radius:12px;font-size:1rem;"
         "font-weight:700;background:#ecfdf5;color:#065f46;border:2px solid #6ee7b7;'>"
-        "✅ NORMAL — Input distribution matches training baseline.</div>"
+        "✅ DATA VALID — Input distribution matches training baseline.</div>"
     )
 
 
@@ -151,6 +151,7 @@ def predict(image: Image.Image, api_url: str):
     findings_list = ", ".join(payload.get("predicted_labels", [])) or "No findings above threshold"
 
     return (
+        image,
         chart,
         findings_list,
         model_label,
@@ -239,15 +240,20 @@ with gr.Blocks(
     gr.Markdown("## Results")
 
     with gr.Row():
-        model_used   = gr.Textbox(label="Model Used (A/B Arm)", interactive=False, scale=1)
-        latency_out  = gr.Textbox(label="Inference Latency",     interactive=False, scale=1)
-
-    findings_out = gr.Textbox(label="All Findings Detected", interactive=False)
-    drift_out    = gr.HTML(label="Data Drift Alert")
-    top3_chart   = gr.Plot(label="Top-3 Predicted Pathologies")
+        with gr.Column(scale=1):
+            analyzed_img_out = gr.Image(label="Analyzed X-Ray", interactive=False)
+            drift_out    = gr.HTML(label="Data Drift Alert")
+        with gr.Column(scale=2):
+            top3_chart   = gr.Plot(label="Top-3 Predicted Pathologies")
+            findings_out = gr.Textbox(label="Findings Exceeding Disease Thresholds", interactive=False)
+            with gr.Row():
+                model_used   = gr.Textbox(label="Model Used (A/B Arm)", interactive=False, scale=1)
+                latency_out  = gr.Textbox(label="Inference Latency",     interactive=False, scale=1)
 
     gr.Markdown("""
     ---
+    **Note on Explainability:** This model provides a global classification score. To visualize exactly *where* the disease is on the image, an additional Grad-CAM (Class Activation Mapping) layer would need to be implemented.
+    
     **14 Classes:** Atelectasis · Cardiomegaly · Effusion · Infiltration · Mass · Nodule ·
     Pneumonia · Pneumothorax · Consolidation · Edema · Emphysema · Fibrosis ·
     Pleural Thickening · Hernia
@@ -263,7 +269,7 @@ with gr.Blocks(
     submit_btn.click(
         fn=predict,
         inputs=[image_input, api_url],
-        outputs=[top3_chart, findings_out, model_used, latency_out, drift_out],
+        outputs=[analyzed_img_out, top3_chart, findings_out, model_used, latency_out, drift_out],
     )
 
 

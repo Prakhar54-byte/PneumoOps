@@ -570,8 +570,6 @@ class CAMHook:
         self.hook_f.remove()
         self.hook_b.remove()
 
-
-<<<<<<< HEAD
 def generate_cam_overlay(image: Image.Image, cam_tensor: "torch.Tensor") -> str:
     cam = cam_tensor.detach().cpu().numpy()
     cam = np.maximum(cam, 0)
@@ -589,7 +587,7 @@ def generate_cam_overlay(image: Image.Image, cam_tensor: "torch.Tensor") -> str:
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
-=======
+
 def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
     try:
         cam = cam_tensor.detach().cpu().numpy()
@@ -617,7 +615,7 @@ def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("utf-8")
->>>>>>> ed1c88d (gradcam heatmap not rendering is fixed)
+
 
 
 def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:

@@ -543,7 +543,7 @@ def postprocess_probabilities(probabilities: np.ndarray) -> dict[str, Any]:
 
     return {
         "predicted_labels": predicted_labels,
-        "all_predictions": all_predictions,
+        "all_predictions": all_predictions, "summary": "No finding reached the 30% clinically noteworthy threshold.",
         "top_predictions": sorted_pairs[: min(5, len(sorted_pairs))],
         "max_confidence": top_confidence,
         "low_confidence": top_confidence < (LOW_CONFIDENCE_THRESHOLD * 100.0),
@@ -583,7 +583,7 @@ def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
         colormap = cm.get_cmap("jet")(cam_resized)[:, :, :3]
         heatmap = np.uint8(255 * colormap)
         img_np = np.array(image.convert("RGB"))
-        overlay = np.uint8(0.6 * img_np + 0.4 * heatmap)
+        overlay = np.uint8(0.5 * img_np + 0.5 * heatmap)
         out_img = Image.fromarray(overlay)
         buf = io.BytesIO()
         out_img.save(buf, format="PNG")

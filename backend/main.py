@@ -552,6 +552,8 @@ def postprocess_probabilities(probabilities: np.ndarray) -> dict[str, Any]:
 
 
 class CAMHook:
+    """Hook to capture gradients and activations for Grad-CAM."""
+
     def __init__(self, module):
         self.hook_f = module.register_forward_hook(self.hook_fn_fwd)
         self.hook_b = module.register_full_backward_hook(self.hook_fn_bwd)
@@ -559,16 +561,17 @@ class CAMHook:
         self.gradients = None
 
     def hook_fn_fwd(self, module, input, output):
-        self.features = output
+        self.features = output.detach()
 
     def hook_fn_bwd(self, module, grad_in, grad_out):
-        self.gradients = grad_out[0]
+        self.gradients = grad_out[0].detach()
 
     def remove(self):
         self.hook_f.remove()
         self.hook_b.remove()
 
 
+<<<<<<< HEAD
 def generate_cam_overlay(image: Image.Image, cam_tensor: "torch.Tensor") -> str:
     cam = cam_tensor.detach().cpu().numpy()
     cam = np.maximum(cam, 0)
@@ -586,6 +589,35 @@ def generate_cam_overlay(image: Image.Image, cam_tensor: "torch.Tensor") -> str:
     buf = io.BytesIO()
     out_img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+=======
+def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
+    try:
+        cam = cam_tensor.detach().cpu().numpy()
+        cam = np.maximum(cam, 0)
+        cam = cam - np.min(cam)
+        cam_max = np.max(cam)
+        if cam_max < 1e-8:
+            logger.warning("CAM values too small, returning original image")
+            raise ValueError("CAM values too small")
+        cam = cam / cam_max
+        cam_img = Image.fromarray(np.uint8(255 * cam)).resize(
+            image.size, Image.Resampling.BILINEAR
+        )
+        cam_resized = np.array(cam_img) / 255.0
+        colormap = cm.get_cmap("jet")(cam_resized)[:, :, :3]
+        heatmap = np.uint8(255 * colormap)
+        img_np = np.array(image.convert("RGB"))
+        overlay = np.uint8(0.6 * img_np + 0.4 * heatmap)
+        out_img = Image.fromarray(overlay)
+        buf = io.BytesIO()
+        out_img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception as e:
+        logger.warning(f"CAM overlay generation failed: {e}, returning original image")
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+>>>>>>> ed1c88d (gradcam heatmap not rendering is fixed)
 
 
 def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
@@ -595,18 +627,37 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
     tensor = TRANSFORM(image).unsqueeze(0).to(DEVICE)
     tensor.requires_grad_(True)
 
-    # Try to hook the last conv layer for MobileNetV3 or EfficientNet
     target_layer = None
     if hasattr(PYTORCH_MODEL.base_model, "features"):
-        target_layer = PYTORCH_MODEL.base_model.features[-1]
+        features = PYTORCH_MODEL.base_model.features
+        for child in reversed(list(features.children())):
+            if isinstance(child, torch.nn.Conv2d):
+                target_layer = child
+                break
+        if target_layer is None:
+            target_layer = features[-1]
+            logger.info(
+                f"Using features[-1] as target layer: {type(target_layer).__name__}"
+            )
+        else:
+            logger.info(f"Found Conv2d target layer: {type(target_layer).__name__}")
+    else:
+        logger.warning("No features attribute found on model for CAM")
 
-    cam_hook = CAMHook(target_layer) if target_layer else None
+    cam_hook = None
+    if target_layer is not None:
+        try:
+            cam_hook = CAMHook(target_layer)
+            logger.info(f"CAM hook registered on {type(target_layer).__name__}")
+        except Exception as e:
+            logger.error(f"Failed to register CAM hook: {e}")
+    else:
+        logger.warning("No target layer found for CAM")
 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     start = time.perf_counter()
 
-    # Enable gradients to compute CAM
     with torch.set_grad_enabled(True):
         logits = PYTORCH_MODEL(tensor)
 
@@ -622,16 +673,27 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
 
     cam_b64 = None
     if cam_hook:
-        class_idx = int(np.argmax(probabilities))
-        PYTORCH_MODEL.zero_grad()
-        logits[0, class_idx].backward(retain_graph=True)
-        if cam_hook.features is not None and cam_hook.gradients is not None:
-            pooled_gradients = torch.mean(cam_hook.gradients, dim=[0, 2, 3])
-            for i in range(cam_hook.features.shape[1]):
-                cam_hook.features[:, i, :, :] *= pooled_gradients[i]
-            cam_tensor = torch.mean(cam_hook.features, dim=1).squeeze()
-            cam_b64 = generate_cam_overlay(image, cam_tensor)
-        cam_hook.remove()
+        try:
+            class_idx = int(np.argmax(probabilities))
+            logger.info(f"Computing CAM for class index {class_idx}")
+            PYTORCH_MODEL.zero_grad()
+            logits[0, class_idx].backward(retain_graph=True)
+            if cam_hook.features is not None and cam_hook.gradients is not None:
+                logger.info(f"CAM features shape: {cam_hook.features.shape}")
+                logger.info(f"CAM gradients shape: {cam_hook.gradients.shape}")
+                pooled_gradients = torch.mean(cam_hook.gradients, dim=[0, 2, 3])
+                for i in range(cam_hook.features.shape[1]):
+                    cam_hook.features[:, i, :, :] *= pooled_gradients[i]
+                cam_tensor = torch.mean(cam_hook.features, dim=1).squeeze()
+                logger.info(f"CAM tensor shape: {cam_tensor.shape}")
+                cam_b64 = generate_cam_overlay(image, cam_tensor)
+                logger.info("CAM overlay generated successfully")
+            else:
+                logger.warning("CAM features or gradients are None")
+        except Exception as e:
+            logger.error(f"CAM computation failed: {e}")
+        finally:
+            cam_hook.remove()
 
     return {
         "model_key": "pytorch",

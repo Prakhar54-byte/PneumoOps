@@ -5,7 +5,8 @@ import requests
 import gradio as gr
 from PIL import Image
 
-BACKEND_URL = os.getenv("BACKEND_PREDICT_URL", "http://127.0.0.1:7860/predict")
+PORT = os.getenv("PORT", "7860")
+BACKEND_URL = os.getenv("BACKEND_PREDICT_URL", f"http://127.0.0.1:{PORT}/predict")
 
 def call_backend(image: Image.Image, api_url: str) -> dict:
     buf = io.BytesIO()

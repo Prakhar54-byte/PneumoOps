@@ -50,7 +50,7 @@ LEGACY_MODEL_DIR = BASE_DIR / "models"
 REALWORLD_MODEL_DIR = BASE_DIR / "models" / "realworld_efficientnet_b0"
 CHESTMNIST_MODEL_DIR = BASE_DIR / "models" / "chestmnist_mobilenetv3"
 
-PROFILE = os.getenv("PNEUMOOPS_PROFILE", "realworld").lower()
+PROFILE = os.getenv("PNEUMOOPS_PROFILE", "chestmnist").lower()
 _DEFAULT_MODEL_DIR = {
     "realworld": REALWORLD_MODEL_DIR,
     "chestmnist": CHESTMNIST_MODEL_DIR,
@@ -576,13 +576,9 @@ def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
         cam = np.maximum(cam, 0)
         cam = cam - np.min(cam)
         cam_max = np.max(cam)
-        
         if cam_max > 1e-12:
             cam = cam / cam_max
-        
-        cam_img = Image.fromarray(np.uint8(255 * cam)).resize(
-            image.size, Image.Resampling.BILINEAR
-        )
+        cam_img = Image.fromarray(np.uint8(255 * cam)).resize(image.size, Image.Resampling.BILINEAR)
         cam_resized = np.array(cam_img) / 255.0
         colormap = cm.get_cmap("jet")(cam_resized)[:, :, :3]
         heatmap = np.uint8(255 * colormap)
@@ -597,6 +593,7 @@ def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("utf-8")
+
 
 def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
     if PYTORCH_MODEL is None:
@@ -673,6 +670,7 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
         "cam_b64": cam_b64,
         **postprocess_probabilities(probabilities),
     }
+
 
 def run_onnx_inference(image: Image.Image) -> dict[str, Any]:
     if ONNX_SESSION is None:
@@ -1051,9 +1049,9 @@ async def infer_raw(file: UploadFile = File(...)):
 
 try:
     # Dynamically add frontend dir to path so app.py can be imported
-    _frontend_dir = str(BASE_DIR / "frontend")
-    if _frontend_dir not in sys.path:
-        sys.path.insert(0, _frontend_dir)
+    _root_dir = str(BASE_DIR)
+    if _root_dir not in sys.path:
+        sys.path.insert(0, _root_dir)
 
     import gradio as gr
     from frontend.app import demo as gradio_demo  # the gr.Blocks() object
@@ -1078,3 +1076,4 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", "7860"))
     uvicorn.run(app, host="0.0.0.0", port=port)
+

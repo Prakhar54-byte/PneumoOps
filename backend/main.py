@@ -569,7 +569,7 @@ class CAMHook:
         self.hook_b.remove()
 
 
-def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
+def generate_cam_overlay(image: Image.Image, cam_tensor: "torch.Tensor") -> str:
     cam = cam_tensor.detach().cpu().numpy()
     cam = np.maximum(cam, 0)
     cam = cam - np.min(cam)

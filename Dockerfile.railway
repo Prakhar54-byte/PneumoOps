@@ -10,8 +10,7 @@ RUN groupadd -r pneumoops && useradd -r -g pneumoops appuser
 
 COPY requirements-railway.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision && \
-    pip install --no-cache-dir -r requirements-railway.txt
+    pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-railway.txt
 
 COPY --chown=appuser:pneumoops backend     ./backend
 COPY --chown=appuser:pneumoops frontend    ./frontend

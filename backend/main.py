@@ -21,6 +21,8 @@ from fastapi.responses import PlainTextResponse
 from PIL import Image
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scipy.stats import ks_2samp
+import matplotlib.cm as cm
+import base64
 
 # Heavy ML deps are optional — not installed on the Railway proxy node.
 try:
@@ -441,25 +443,56 @@ def postprocess_probabilities(probabilities: np.ndarray) -> dict[str, Any]:
         predicted_indices = [predicted_index]
         predicted_labels = [CLASS_NAMES[predicted_index]]
 
-    sorted_pairs = sorted(
-        [
-            {
-                "label": CLASS_NAMES[index],
-                "confidence": round(float(probabilities[index]) * 100, 2),
-                "threshold": round(float(THRESHOLDS[index]) * 100, 2) if index < len(THRESHOLDS) else 50.0,
-            }
-            for index in range(len(CLASS_NAMES))
-        ],
-        key=lambda item: item["confidence"],
-        reverse=True,
-    )
+    all_predictions = [
+        {
+            "label": CLASS_NAMES[index],
+            "confidence": round(float(probabilities[index]) * 100, 2),
+            "threshold": round(float(THRESHOLDS[index]) * 100, 2) if index < len(THRESHOLDS) else 50.0,
+            "detected": index in predicted_indices
+        }
+        for index in range(len(CLASS_NAMES))
+    ]
+    sorted_pairs = sorted(all_predictions, key=lambda item: item["confidence"], reverse=True)
     top_confidence = sorted_pairs[0]["confidence"] if sorted_pairs else 0.0
+
     return {
         "predicted_labels": predicted_labels,
+        "all_predictions": all_predictions,
         "top_predictions": sorted_pairs[: min(5, len(sorted_pairs))],
         "max_confidence": top_confidence,
         "low_confidence": top_confidence < (LOW_CONFIDENCE_THRESHOLD * 100.0),
+        "inconclusive_scan": top_confidence < 10.0,
     }
+
+class CAMHook:
+    def __init__(self, module):
+        self.hook_f = module.register_forward_hook(self.hook_fn_fwd)
+        self.hook_b = module.register_full_backward_hook(self.hook_fn_bwd)
+        self.features = None
+        self.gradients = None
+    def hook_fn_fwd(self, module, input, output):
+        self.features = output
+    def hook_fn_bwd(self, module, grad_in, grad_out):
+        self.gradients = grad_out[0]
+    def remove(self):
+        self.hook_f.remove()
+        self.hook_b.remove()
+
+def generate_cam_overlay(image: Image.Image, cam_tensor: torch.Tensor) -> str:
+    cam = cam_tensor.detach().cpu().numpy()
+    cam = np.maximum(cam, 0)
+    cam = cam - np.min(cam)
+    cam = cam / (np.max(cam) + 1e-8)
+    cam_img = Image.fromarray(np.uint8(255 * cam)).resize(image.size, Image.Resampling.BILINEAR)
+    cam_resized = np.array(cam_img) / 255.0
+    colormap = cm.get_cmap("jet")(cam_resized)[:, :, :3]
+    heatmap = np.uint8(255 * colormap)
+    img_np = np.array(image.convert("RGB"))
+    overlay = np.uint8(0.6 * img_np + 0.4 * heatmap)
+    out_img = Image.fromarray(overlay)
+    buf = io.BytesIO()
+    out_img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
 def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
@@ -467,16 +500,48 @@ def run_pytorch_inference(image: Image.Image) -> dict[str, Any]:
         raise RuntimeError("PyTorch checkpoint is missing.")
 
     tensor = TRANSFORM(image).unsqueeze(0).to(DEVICE)
+    tensor.requires_grad_(True)
+    
+    # Try to hook the last conv layer for MobileNetV3 or EfficientNet
+    target_layer = None
+    if hasattr(PYTORCH_MODEL.base_model, "features"):
+        target_layer = PYTORCH_MODEL.base_model.features[-1]
+    
+    cam_hook = CAMHook(target_layer) if target_layer else None
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     start = time.perf_counter()
-    with torch.no_grad():
+    
+    # Enable gradients to compute CAM
+    with torch.set_grad_enabled(True):
         logits = PYTORCH_MODEL(tensor)
-        probabilities = torch.sigmoid(logits).squeeze(0).cpu().numpy() if MULTI_LABEL else torch.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+    
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
     latency_ms = round((time.perf_counter() - start) * 1000, 2)
+    
+    probabilities = torch.sigmoid(logits).squeeze(0).detach().cpu().numpy() if MULTI_LABEL else torch.softmax(logits, dim=1).squeeze(0).detach().cpu().numpy()
+
+    cam_b64 = None
+    if cam_hook:
+        class_idx = int(np.argmax(probabilities))
+        PYTORCH_MODEL.zero_grad()
+        logits[0, class_idx].backward(retain_graph=True)
+        if cam_hook.features is not None and cam_hook.gradients is not None:
+            pooled_gradients = torch.mean(cam_hook.gradients, dim=[0, 2, 3])
+            for i in range(cam_hook.features.shape[1]):
+                cam_hook.features[:, i, :, :] *= pooled_gradients[i]
+            cam_tensor = torch.mean(cam_hook.features, dim=1).squeeze()
+            cam_b64 = generate_cam_overlay(image, cam_tensor)
+        cam_hook.remove()
+
     return {
         "model_key": "pytorch",
         "model_used": "Baseline PyTorch",
         "latency_ms": latency_ms,
         "probabilities": probabilities.tolist(),
+        "cam_b64": cam_b64,
         **postprocess_probabilities(probabilities),
     }
 
@@ -720,19 +785,23 @@ async def predict(request: Request, background_tasks: BackgroundTasks, file: Upl
         "selected_arm": "A" if selected_result["model_key"] == "pytorch" else "B",
         "weighted_traffic_split": TRAFFIC_WEIGHTS,
         "predicted_labels": selected_result["predicted_labels"],
+        "all_predictions": selected_result["all_predictions"],
         "top_predictions": selected_result["top_predictions"],
         "confidence": selected_result["max_confidence"],
         "low_confidence": selected_result["low_confidence"],
+        "inconclusive_scan": selected_result["inconclusive_scan"],
         "confidence_review_threshold": LOW_CONFIDENCE_THRESHOLD * 100.0,
         "pytorch_latency_ms": pytorch_latency,
         "onnx_latency_ms": onnx_latency,
         "latency_delta_ms": latency_delta,
+        "latency_ms": selected_result["latency_ms"],
         "drift": drift_result,
         "input_summary": input_summary,
         "warning_flags": warning_flags,
         "recommendation": build_recommendation(selected_result, drift_result, dual_results),
         "active_onnx_model": ACTIVE_ONNX_MODEL_NAME,
         "recent_history": list(REQUEST_LOG_HISTORY),
+        "cam_b64": dual_results["pytorch"].get("cam_b64"),
     }
 
     history_entry = {

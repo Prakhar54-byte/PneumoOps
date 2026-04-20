@@ -279,7 +279,6 @@ with gr.Blocks(theme=gr.themes.Base(), css=CSS, title="PneumoOps Redesigned") as
         fn=predict,
         inputs=[image_input, api_url],
         outputs=[arm_out, lat_out, summary_out, ethics_out, qc_out, top3_out, classes_out, calib_out, analyzed_img_out],
-        outputs=[arm_out, lat_out, summary_out, ethics_out, qc_out, top3_out, classes_out, calib_out, analyzed_img_out],
     )
 
 if __name__ == "__main__":

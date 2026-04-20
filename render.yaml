@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: pneumo-ops
+    env: docker
+    dockerContext: .
+    dockerfilepath: Dockerfile.railway
+    plan: starter # Recommended for PyTorch memory needs
+    healthCheckPath: /health
+    envVars:
+      - key: PNEUMOOPS_PROFILE
+        value: chestmnist
+      - key: GRADIO_TEMP_DIR
+        value: /tmp
+      - key: PORT
+        value: 10000 # Render default, code handles this

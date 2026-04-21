@@ -1,4 +1,3 @@
-import base64
 import io
 import os
 import requests
@@ -192,13 +191,6 @@ def predict(image: Image.Image, api_url: str):
     classes_html = render_14_classes(payload)
     calib_html = render_calibration_info()
     
-    cam_b64 = payload.get("cam_b64")
-    if cam_b64:
-        img_data = base64.b64decode(cam_b64)
-        out_image = Image.open(io.BytesIO(img_data))
-    else:
-        out_image = image
-        
     ethics_html = """<div class="custom-card" style="border-top: 4px solid #ef4444; background: #450a0a;">
     <div class="metric-title">ETHICAL & CLINICAL COMPLIANCE</div>
     <div style="font-size:0.9rem; color:#fca5a5;">
@@ -208,7 +200,7 @@ def predict(image: Image.Image, api_url: str):
     </div>
 </div>"""
     summary_html = f'<div class="custom-card" style="border-left: 4px solid #3b82f6; background: #1e293b; padding: 15px; margin-bottom: 10px;"><div class="metric-title">CLINICAL SUMMARY</div><div style="font-size:1.1rem; font-weight:500; color:#f8fafc;">{payload.get("summary", "Screening complete.")}</div></div>'
-    return arm_html, lat_html, summary_html, ethics_html, qc_html, top3_html, classes_html, calib_html, out_image
+    return arm_html, lat_html, summary_html, ethics_html, qc_html, top3_html, classes_html, calib_html
 
 CSS = """
 body, .gradio-container {
@@ -246,10 +238,6 @@ with gr.Blocks(theme=gr.themes.Base(), css=CSS, title="PneumoOps Redesigned") as
             image_input = gr.Image(type="pil", label="Upload Chest X-Ray")
             submit_btn = gr.Button("🔬 Run Screening", variant="primary", size="lg")
             
-            gr.HTML('<div style="margin-top:20px; font-weight:600; color:#e5e5e5; font-size:1.1rem;">Explainability (Grad-CAM)</div>')
-            gr.HTML("<div style='color:#9ca3af; font-size:0.85rem; margin-bottom:8px;'>Heatmap identifying the regions that drove the model's top prediction.</div>")
-            analyzed_img_out = gr.Image(label="Analyzed X-Ray", interactive=False)
-            
         with gr.Column(scale=2):
             with gr.Row():
                 arm_out = gr.HTML()
@@ -276,7 +264,7 @@ with gr.Blocks(theme=gr.themes.Base(), css=CSS, title="PneumoOps Redesigned") as
     submit_btn.click(
         fn=predict,
         inputs=[image_input, api_url],
-        outputs=[arm_out, lat_out, summary_out, ethics_out, qc_out, top3_out, classes_out, calib_out, analyzed_img_out],
+        outputs=[arm_out, lat_out, summary_out, ethics_out, qc_out, top3_out, classes_out, calib_out],
     )
 
 if __name__ == "__main__":
